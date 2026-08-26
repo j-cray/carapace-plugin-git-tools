@@ -164,7 +164,6 @@ impl<'a> RemoteTransport<'a> {
     pub fn clone(
         &self,
         url: &str,
-        _target_path: Option<&str>,
         branch: Option<&str>,
         depth: Option<usize>,
     ) -> Result<GitToolResult, String> {
@@ -236,17 +235,24 @@ impl<'a> RemoteTransport<'a> {
         };
 
         let summary = format!("Cloned repository from {url} into '{}' ({handshake_status})", dest.display());
-        Ok(GitToolResult::ok(
-            json!({
-                "url": url,
-                "target_path": dest.display().to_string(),
-                "branch": initial_branch,
-                "depth": depth,
-                "remote_handshake": handshake_status,
-                "discovered_refs": discovered_refs
-            }),
-            summary,
-        ))
+        let data = json!({
+            "url": url,
+            "target_path": dest.display().to_string(),
+            "branch": initial_branch,
+            "depth": depth,
+            "remote_handshake": handshake_status,
+            "discovered_refs": discovered_refs
+        });
+
+        if depth.is_some() {
+            Ok(GitToolResult::ok_with_warning(
+                data,
+                summary,
+                "Shallow clone (depth) is not yet implemented; a full clone was performed.",
+            ))
+        } else {
+            Ok(GitToolResult::ok(data, summary))
+        }
     }
 
     /// Fetch changes from a remote
@@ -355,16 +361,23 @@ impl<'a> RemoteTransport<'a> {
 
         let summary = format!("Pulled from {remote_name}/{branch_name} (rebase: {rebase})");
 
-        Ok(GitToolResult::ok(
-            json!({
-                "remote": remote_name,
-                "branch": branch_name,
-                "rebase": rebase,
-                "fetch_details": fetch_res.data,
-                "merge_details": merge_res.map(|r| r.data)
-            }),
-            summary,
-        ))
+        let data = json!({
+            "remote": remote_name,
+            "branch": branch_name,
+            "rebase": rebase,
+            "fetch_details": fetch_res.data,
+            "merge_details": merge_res.map(|r| r.data)
+        });
+
+        if rebase {
+            Ok(GitToolResult::ok_with_warning(
+                data,
+                summary,
+                "Rebase mode is not yet implemented; a merge was performed instead.",
+            ))
+        } else {
+            Ok(GitToolResult::ok(data, summary))
+        }
     }
 
     /// Push commits/tags to a remote

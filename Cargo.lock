@@ -102,7 +102,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "tempfile",
- "thiserror",
  "wit-bindgen",
  "wit-bindgen-rt",
 ]

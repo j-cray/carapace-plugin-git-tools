@@ -1,7 +1,6 @@
 #[allow(warnings)]
 pub mod bindings;
 
-
 pub mod config;
 pub mod engine;
 pub mod safety;

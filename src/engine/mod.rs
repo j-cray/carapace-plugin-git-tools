@@ -9,6 +9,9 @@ use sha1::Digest;
 use crate::config::PluginConfig;
 use crate::types::GitToolResult;
 
+/// Standard Git regular file mode (100644 octal)
+const REGULAR_FILE_MODE: u32 = 0o100_644;
+
 pub mod objects;
 pub mod transport;
 
@@ -106,7 +109,7 @@ impl<'a> GitEngine<'a> {
                 self.find_packed_ref(&format!("refs/heads/{branch_name}"))
             };
             Ok((Some(branch_name), commit_hash))
-        } else if trimmed.len() == 40 {
+        } else if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
             // Detached HEAD
             Ok((None, Some(trimmed.to_string())))
         } else {
@@ -893,6 +896,7 @@ impl<'a> GitEngine<'a> {
             for commit_blob in &commit_blobs {
                 if commit_blob.1.lines().any(|l| l == *line) {
                     matched_commit = Some(commit_blob.0.clone());
+                    break;
                 }
             }
 
@@ -1065,10 +1069,8 @@ impl<'a> GitEngine<'a> {
                 }
             }
         } else {
-            // Unstaged diff: Worktree vs Index (or HEAD if index empty or no commits yet)
-            let base_files = if head_files.is_empty() {
-                &head_files
-            } else if !index_files.is_empty() {
+            // Unstaged diff: Worktree vs Index (falling back to HEAD if no index)
+            let base_files = if !index_files.is_empty() {
                 &index_files
             } else {
                 &head_files
@@ -1166,7 +1168,7 @@ impl<'a> GitEngine<'a> {
             for (rel_path, abs_path) in worktree_files {
                 let bytes = fs::read(&abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
                 let blob_sha = write_blob(&self.git_dir(), &bytes)?;
-                index.insert(rel_path.clone(), (0o100644, blob_sha));
+                index.insert(rel_path.clone(), (REGULAR_FILE_MODE, blob_sha));
                 added.push(rel_path);
             }
         } else if let Some(target_paths) = paths {
@@ -1182,7 +1184,7 @@ impl<'a> GitEngine<'a> {
                         if rel_path == &clean_norm || rel_path.starts_with(&dir_prefix) {
                             let bytes = fs::read(abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
                             let blob_sha = write_blob(&self.git_dir(), &bytes)?;
-                            index.insert(rel_path.clone(), (0o100644, blob_sha));
+                            index.insert(rel_path.clone(), (REGULAR_FILE_MODE, blob_sha));
                             added.push(rel_path.clone());
                         }
                     }
@@ -1197,7 +1199,7 @@ impl<'a> GitEngine<'a> {
                 } else if full_path.exists() {
                     let bytes = fs::read(&full_path).map_err(|e| format!("Failed to read '{clean_norm}': {e}"))?;
                     let blob_sha = write_blob(&self.git_dir(), &bytes)?;
-                    index.insert(clean_norm.clone(), (0o100644, blob_sha));
+                    index.insert(clean_norm.clone(), (REGULAR_FILE_MODE, blob_sha));
                     added.push(clean_norm);
                 } else if index.contains_key(&clean_norm) {
                     // Deleted file staged
@@ -2114,7 +2116,7 @@ impl<'a> GitEngine<'a> {
                 for (rel_path, abs_path) in &worktree_files {
                     if let Ok(bytes) = fs::read(abs_path) {
                         if let Ok(sha) = write_blob(&self.git_dir(), &bytes) {
-                            current_map.insert(rel_path.clone(), (0o100644, sha));
+                            current_map.insert(rel_path.clone(), (REGULAR_FILE_MODE, sha));
                         }
                     }
                 }

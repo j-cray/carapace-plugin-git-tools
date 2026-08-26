@@ -178,4 +178,3 @@ pub fn normalize_path(path: &Path) -> PathBuf {
         components.into_iter().collect()
     }
 }
-

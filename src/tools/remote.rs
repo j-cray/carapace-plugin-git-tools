@@ -244,7 +244,6 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
             transport
                 .clone(
                     &params.url,
-                    params.target_path.as_deref(),
                     params.branch.as_deref(),
                     params.depth,
                 )
@@ -300,8 +299,13 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
             let branch = params.branch.as_deref().unwrap_or("main");
             let force = params.force.unwrap_or(false);
 
-            if let Err(e) = SafetyChecker::check_branch_protection(branch, force, config, ctx) {
-                return GitToolResult::err(e);
+            if force {
+                if let Err(e) = SafetyChecker::verify_destructive_allowed("git_push (force)", ctx) {
+                    return GitToolResult::err(e);
+                }
+                if let Err(e) = SafetyChecker::check_branch_protection(branch, force, config, ctx) {
+                    return GitToolResult::err(e);
+                }
             }
 
             let transport = RemoteTransport::new(path, config);

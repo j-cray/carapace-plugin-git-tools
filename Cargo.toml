@@ -17,7 +17,6 @@ wit-bindgen = { version = "0.36.0", default-features = false, features = ["reall
 wit-bindgen-rt = "0.36.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "2.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 gix = { version = "0.87", default-features = false, features = ["sha1", "revision", "index", "status", "dirwalk", "blob-diff", "merge", "blame", "attributes", "excludes", "serde"] }
 sha1 = "0.10"
