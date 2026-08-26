@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-use git_tools::bindings::exports::carapace::plugin::tool::ToolContext;
+use git_tools::bindings::exports::tool::ToolContext;
 use git_tools::config::PluginConfig;
 use git_tools::engine::transport::{parse_smart_http_refs, RemoteTransport};
 use git_tools::engine::vfs;

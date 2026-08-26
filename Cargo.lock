@@ -141,7 +141,7 @@ dependencies = [
  "sha1",
  "tempfile",
  "wit-bindgen",
- "wit-bindgen-rt",
+ "wit-bindgen-rt 0.44.0",
 ]
 
 [[package]]
@@ -349,21 +349,27 @@ dependencies = [
 
 [[package]]
 name = "wit-bindgen"
-version = "0.36.0"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a2b3e15cd6068f233926e7d8c7c588b2ec4fb7cc7bf3824115e7c7e2a8485a3"
+checksum = "10fb6648689b3929d56bbc7eb1acf70c9a42a29eb5358c67c10f54dbd5d695de"
 dependencies = [
- "wit-bindgen-rt",
+ "wit-bindgen-rt 0.41.0",
 ]
 
 [[package]]
 name = "wit-bindgen-rt"
-version = "0.36.0"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7947d0131c7c9da3f01dfde0ab8bd4c4cf3c5bd49b6dba0ae640f1fa752572ea"
+checksum = "c4db52a11d4dfb0a59f194c064055794ee6564eb1ced88c25da2cf76e50c5621"
 dependencies = [
  "bitflags",
 ]
+
+[[package]]
+name = "wit-bindgen-rt"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "653c85dd7aee6fe6f4bded0d242406deadae9819029ce6f7d258c920c384358a"
 
 [[package]]
 name = "zmij"

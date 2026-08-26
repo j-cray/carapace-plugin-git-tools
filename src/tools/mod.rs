@@ -5,7 +5,7 @@ pub mod remote;
 pub mod stash;
 pub mod working_tree;
 
-use crate::bindings::exports::carapace::plugin::tool::{ToolContext, ToolDefinition};
+use crate::bindings::exports::tool::{ToolContext, ToolDefinition};
 use crate::config::PluginConfig;
 use crate::types::GitToolResult;
 

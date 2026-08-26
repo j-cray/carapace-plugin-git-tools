@@ -14,8 +14,8 @@ package = "carapace:plugin"
 target = { path = "wit/plugin.wit", world = "tool-plugin" }
 
 [dependencies]
-wit-bindgen = { version = "0.36.0", default-features = false, features = ["realloc"] }
-wit-bindgen-rt = "0.36.0"
+wit-bindgen = { version = "0.41", default-features = false, features = ["realloc"] }
+wit-bindgen-rt = "0.44"
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }

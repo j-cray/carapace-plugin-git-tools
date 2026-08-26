@@ -474,8 +474,37 @@ world channel-plugin {
 // World definition for tool plugins
 world tool-plugin {
     import host;
-    export manifest;
-    export tool;
+    export manifest: interface {
+        enum plugin-kind {
+            channel,
+            tool,
+            webhook,
+            service,
+            hook,
+        }
+
+        record plugin-manifest {
+            id: string,
+            name: string,
+            description: string,
+            version: string,
+            kind: plugin-kind,
+        }
+
+        get-manifest: func() -> plugin-manifest;
+    }
+    export tool: interface {
+        use types.{tool-context, tool-result, plugin-error};
+
+        record tool-definition {
+            name: string,
+            description: string,
+            input-schema: string,
+        }
+
+        get-definitions: func() -> list<tool-definition>;
+        invoke: func(name: string, params: string, ctx: tool-context) -> result<tool-result, plugin-error>;
+    }
 }
 
 // World definition for webhook plugins

@@ -7,8 +7,8 @@ pub mod safety;
 pub mod tools;
 pub mod types;
 
-use bindings::exports::carapace::plugin::manifest::{Guest as ManifestGuest, PluginKind, PluginManifest};
-use bindings::exports::carapace::plugin::tool::{Guest as ToolGuest, ToolContext, ToolDefinition, ToolResult};
+use bindings::exports::manifest::{Guest as ManifestGuest, PluginKind, PluginManifest};
+use bindings::exports::tool::{Guest as ToolGuest, ToolContext, ToolDefinition, ToolResult};
 use bindings::carapace::plugin::types::PluginError;
 
 use config::PluginConfig;

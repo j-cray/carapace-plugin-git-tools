@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use serde_json::json;
-use crate::bindings::exports::carapace::plugin::tool::{ToolContext, ToolDefinition};
+use crate::bindings::exports::tool::{ToolContext, ToolDefinition};
 use crate::config::PluginConfig;
 
 use crate::engine::transport::RemoteTransport;

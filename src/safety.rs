@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use crate::bindings::exports::carapace::plugin::tool::ToolContext;
+use crate::bindings::exports::tool::ToolContext;
 use crate::config::PluginConfig;
 
 pub struct SafetyChecker;
