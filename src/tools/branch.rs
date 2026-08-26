@@ -173,6 +173,16 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                         }
                     }
                 }
+                if let Some(ref new_b) = params.new_name {
+                    if SafetyChecker::is_branch_protected(new_b, config) {
+                        if let Err(e) = SafetyChecker::verify_destructive_allowed("git_branch (rename to protected branch)", ctx) {
+                            return GitToolResult::err(e);
+                        }
+                        if !force {
+                            return GitToolResult::err(format!("Target branch '{new_b}' is protected. Overwriting requires force: true."));
+                        }
+                    }
+                }
             } else if params.action == "create" && force {
                 if let Some(ref b) = params.branch_name {
                     if SafetyChecker::is_branch_protected(b, config) {

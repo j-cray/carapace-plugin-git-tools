@@ -591,3 +591,244 @@ fn test_stash_cleanliness_and_packed_refs() {
     assert!(del_branch.success);
     assert!(engine.rev_parse_hash("packed-feature").is_err());
 }
+
+#[test]
+fn test_rev_parse_caret_syntax_and_merge_parents() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Commit 1 on main
+    fs::write(repo_path.join("base.txt"), "base\n").unwrap();
+    engine.add(None, true).unwrap();
+    let commit1 = engine.commit("commit 1 on main", false).unwrap();
+    let hash1 = commit1.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Commit 2 on main
+    fs::write(repo_path.join("main_extra.txt"), "extra\n").unwrap();
+    engine.add(None, true).unwrap();
+    let commit2 = engine.commit("commit 2 on main", false).unwrap();
+    let hash2 = commit2.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Create and checkout branch feat
+    engine.checkout("feat", true, Some(&hash1)).unwrap();
+    fs::write(repo_path.join("feat.txt"), "feat content\n").unwrap();
+    engine.add(None, true).unwrap();
+    let feat_commit = engine.commit("feat commit", false).unwrap();
+    let feat_hash = feat_commit.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Switch back to main and merge feat with no_ff: true
+    engine.checkout("main", false, None).unwrap();
+    let merge_res = engine.merge("feat", Some("Merge feat into main"), true, false).unwrap();
+    assert!(merge_res.success);
+    let merge_hash = merge_res.data["merge_commit_hash"].as_str().unwrap().to_string();
+
+    // Verify HEAD is merge commit
+    assert_eq!(engine.rev_parse_hash("HEAD").unwrap(), merge_hash);
+
+    // Verify HEAD^ and HEAD^1 resolve to 1st parent (commit2 on main)
+    assert_eq!(engine.rev_parse_hash("HEAD^").unwrap(), hash2);
+    assert_eq!(engine.rev_parse_hash("HEAD^1").unwrap(), hash2);
+
+    // Verify HEAD^2 resolves to 2nd parent (feat_commit on feat branch)
+    assert_eq!(engine.rev_parse_hash("HEAD^2").unwrap(), feat_hash);
+
+    // Verify HEAD^^ resolves to grandparent (commit1)
+    assert_eq!(engine.rev_parse_hash("HEAD^^").unwrap(), hash1);
+}
+
+#[test]
+fn test_directory_staging_isolation_and_deletion() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Create src/lib.rs and src_extra/other.rs
+    fs::create_dir_all(repo_path.join("src")).unwrap();
+    fs::create_dir_all(repo_path.join("src_extra")).unwrap();
+    fs::write(repo_path.join("src").join("lib.rs"), "pub fn run() {}\n").unwrap();
+    fs::write(repo_path.join("src_extra").join("other.rs"), "pub fn extra() {}\n").unwrap();
+
+    // Stage only "src" directory
+    let add_res = engine.add(Some(vec!["src".to_string()]), false).unwrap();
+    assert!(add_res.success);
+    let staged = add_res.data["staged_paths"].as_array().unwrap();
+    assert!(staged.iter().any(|p| p.as_str() == Some("src/lib.rs")));
+    assert!(!staged.iter().any(|p| p.as_str() == Some("src_extra/other.rs")), "src_extra should not be staged when staging src");
+
+    // Commit src/lib.rs
+    engine.commit("initial src commit", false).unwrap();
+
+    // Delete src/lib.rs and stage "src" directory
+    fs::remove_file(repo_path.join("src").join("lib.rs")).unwrap();
+    let add_del = engine.add(Some(vec!["src".to_string()]), false).unwrap();
+    let staged_del = add_del.data["staged_paths"].as_array().unwrap();
+    assert!(staged_del.iter().any(|p| p.as_str() == Some("deleted: src/lib.rs")));
+}
+
+#[test]
+fn test_three_way_merge_file_deletion_and_reconciliation() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Initial commit on main: file1.txt and file2.txt
+    fs::write(repo_path.join("file1.txt"), "original file1\n").unwrap();
+    fs::write(repo_path.join("file2.txt"), "original file2 to be deleted\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("base commit", false).unwrap();
+
+    // Feature branch: delete file2.txt, modify file1.txt, add file3.txt
+    engine.checkout("feat-changes", true, None).unwrap();
+    fs::remove_file(repo_path.join("file2.txt")).unwrap();
+    fs::write(repo_path.join("file1.txt"), "modified file1 on feat\n").unwrap();
+    fs::write(repo_path.join("file3.txt"), "new file3 on feat\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("feat updates", false).unwrap();
+
+    // Switch back to main: add file4.txt
+    engine.checkout("main", false, None).unwrap();
+    fs::write(repo_path.join("file4.txt"), "file4 on main\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("main update", false).unwrap();
+
+    // Merge feat-changes into main
+    let merge_res = engine.merge("feat-changes", Some("Merge feat-changes into main"), false, false).unwrap();
+    assert!(merge_res.success);
+
+    // Verify 3-way reconciliation:
+    // file2.txt should be deleted
+    assert!(!repo_path.join("file2.txt").exists(), "file2.txt should be removed after merge");
+    // file1.txt should have feature modifications
+    assert_eq!(fs::read_to_string(repo_path.join("file1.txt")).unwrap(), "modified file1 on feat\n");
+    // file3.txt and file4.txt should both exist
+    assert!(repo_path.join("file3.txt").exists(), "file3.txt from feat should exist");
+    assert!(repo_path.join("file4.txt").exists(), "file4.txt from main should exist");
+}
+
+#[test]
+fn test_clean_nested_empty_directories() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Initial commit
+    fs::write(repo_path.join("tracked.txt"), "tracked\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("init", false).unwrap();
+
+    // Create deep nested directory tree with an untracked file
+    let deep_dir = repo_path.join("deep").join("nested").join("folder");
+    fs::create_dir_all(&deep_dir).unwrap();
+    fs::write(deep_dir.join("scratch.tmp"), "temporary data\n").unwrap();
+
+    // Clean with directories: true
+    let clean_res = engine.clean(false, true).unwrap();
+    assert!(clean_res.success);
+
+    // Deep directory structure should be completely pruned
+    assert!(!repo_path.join("deep").exists(), "Empty nested directory tree should be pruned completely");
+}
+
+#[test]
+fn test_branch_rename_target_protection() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        default_repo_path: repo_path.display().to_string(),
+        ..Default::default()
+    };
+    let normal_ctx = ToolContext {
+        agent_id: Some("agent-1".to_string()),
+        session_key: Some("main".to_string()),
+        message_channel: None,
+        sandboxed: false,
+    };
+    let sandboxed_ctx = ToolContext {
+        agent_id: Some("agent-2".to_string()),
+        session_key: Some("sandbox".to_string()),
+        message_channel: None,
+        sandboxed: true,
+    };
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    fs::write(repo_path.join("app.txt"), "app\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("init", false).unwrap();
+
+    // Create branch temp-feat
+    engine.branch("create", Some("temp-feat"), None, None, false).unwrap();
+
+    // Renaming temp-feat to protected branch "main" without force should fail
+    let res_rename_unforced = tools::dispatch(
+        "git_branch",
+        r#"{"action": "rename", "branch_name": "temp-feat", "new_name": "main"}"#,
+        &config,
+        &normal_ctx,
+    );
+    assert!(!res_rename_unforced.success);
+
+    // Renaming temp-feat to "main" in sandboxed mode with force: true should fail
+    let res_rename_sandboxed = tools::dispatch(
+        "git_branch",
+        r#"{"action": "rename", "branch_name": "temp-feat", "new_name": "main", "force": true}"#,
+        &config,
+        &sandboxed_ctx,
+    );
+    assert!(!res_rename_sandboxed.success);
+}
+
+#[test]
+fn test_annotated_tag_show_inspection() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        author_name: "Tag Inspector".to_string(),
+        author_email: "tagger@test.ai".to_string(),
+        ..Default::default()
+    };
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    fs::write(repo_path.join("version.txt"), "1.0.0\n").unwrap();
+    engine.add(None, true).unwrap();
+    let commit = engine.commit("release commit", false).unwrap();
+    let commit_hash = commit.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Create annotated tag
+    let tag_res = engine.tag("create", Some("v1.0.0"), Some("HEAD"), Some("Official Release 1.0.0")).unwrap();
+    assert!(tag_res.success);
+
+    // Inspect tag with show
+    let show_res = engine.show(Some("v1.0.0")).unwrap();
+    assert!(show_res.success);
+    assert_eq!(show_res.data["kind"], "tag");
+    assert_eq!(show_res.data["tag_name"], "v1.0.0");
+    assert_eq!(show_res.data["message"], "Official Release 1.0.0");
+    assert_eq!(show_res.data["target_object"], commit_hash);
+}
+
+#[test]
+fn test_reset_invalid_mode() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    fs::write(repo_path.join("file.txt"), "hello\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("init", false).unwrap();
+
+    let invalid_reset = engine.reset(None, Some("unsupported_mode"), None);
+    assert!(invalid_reset.is_err());
+}

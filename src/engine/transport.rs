@@ -119,6 +119,11 @@ impl<'a> RemoteTransport<'a> {
                 fs::write(&config_file, filtered_lines.join("\n"))
                     .map_err(|e| format!("Failed to update .git/config: {e}"))?;
 
+                let remotes_dir = self.git_dir().join("refs").join("remotes").join(name);
+                if remotes_dir.exists() {
+                    let _ = fs::remove_dir_all(&remotes_dir);
+                }
+
                 let summary = format!("Removed remote '{name}'");
                 Ok(GitToolResult::ok(json!({ "removed_remote": name }), summary))
             }
@@ -159,13 +164,11 @@ impl<'a> RemoteTransport<'a> {
     pub fn clone(
         &self,
         url: &str,
-        target_path: Option<&str>,
+        _target_path: Option<&str>,
         branch: Option<&str>,
         depth: Option<usize>,
     ) -> Result<GitToolResult, String> {
-        let dest = target_path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.repo_path.clone());
+        let dest = self.repo_path.clone();
 
         fs::create_dir_all(&dest).map_err(|e| format!("Failed to create clone destination directory: {e}"))?;
 
@@ -337,11 +340,12 @@ impl<'a> RemoteTransport<'a> {
     /// Pull and merge changes from a remote
     pub fn pull(&self, remote: Option<&str>, branch: Option<&str>, rebase: bool) -> Result<GitToolResult, String> {
         let remote_name = remote.unwrap_or("origin");
-        let branch_name = branch.unwrap_or("main");
+        let engine = crate::engine::GitEngine::new(self.repo_path.clone(), self.config);
+        let default_branch = engine.get_head().ok().and_then(|(b, _)| b).unwrap_or_else(|| "main".to_string());
+        let branch_name = branch.unwrap_or(&default_branch);
 
         let fetch_res = self.fetch(Some(remote_name), Some(branch_name), false, false)?;
         let tracking_ref = format!("{remote_name}/{branch_name}");
-        let engine = crate::engine::GitEngine::new(self.repo_path.clone(), self.config);
 
         let merge_res = if engine.rev_parse_hash(&tracking_ref).is_ok() {
             Some(engine.merge(&tracking_ref, None, false, false)?)
@@ -373,7 +377,9 @@ impl<'a> RemoteTransport<'a> {
         tags: bool,
     ) -> Result<GitToolResult, String> {
         let remote_name = remote.unwrap_or("origin");
-        let branch_name = branch.unwrap_or("main");
+        let engine = crate::engine::GitEngine::new(self.repo_path.clone(), self.config);
+        let default_branch = engine.get_head().ok().and_then(|(b, _)| b).unwrap_or_else(|| "main".to_string());
+        let branch_name = branch.unwrap_or(&default_branch);
 
         let remote_info = self.remote("get_url", Some(remote_name), None);
         let remote_url = remote_info.ok().and_then(|res| res.data["url"].as_str().map(String::from));

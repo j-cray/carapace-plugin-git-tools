@@ -74,17 +74,38 @@ impl SafetyChecker {
 
     /// Check if target branch name is in the configured protected branches list
     pub fn is_branch_protected(branch_name: &str, config: &PluginConfig) -> bool {
-        let normalized = branch_name
-            .trim()
-            .trim_start_matches("refs/heads/")
-            .trim_start_matches("heads/")
-            .trim_start_matches("refs/remotes/origin/")
-            .trim_start_matches("origin/");
-
+        let normalized = Self::normalize_branch_name(branch_name);
         config
             .protected_branches
             .iter()
-            .any(|b| b.trim().eq_ignore_ascii_case(normalized))
+            .any(|b| b.trim().eq_ignore_ascii_case(&normalized))
+    }
+
+    /// Normalize branch name by removing prefixes like refs/heads/, refs/remotes/<remote>/, etc.
+    pub fn normalize_branch_name(branch_name: &str) -> String {
+        let trimmed = branch_name.trim();
+        if let Some(rest) = trimmed.strip_prefix("refs/heads/") {
+            return rest.to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("heads/") {
+            return rest.to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("refs/remotes/") {
+            if let Some((_, b)) = rest.split_once('/') {
+                return b.to_string();
+            }
+            return rest.to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("remotes/") {
+            if let Some((_, b)) = rest.split_once('/') {
+                return b.to_string();
+            }
+            return rest.to_string();
+        }
+        if let Some(rest) = trimmed.strip_prefix("origin/") {
+            return rest.to_string();
+        }
+        trimmed.to_string()
     }
 
     /// Check if target branch is protected and whether the destructive action is allowed
@@ -94,12 +115,7 @@ impl SafetyChecker {
         config: &PluginConfig,
         ctx: &ToolContext,
     ) -> Result<(), String> {
-        let normalized = branch_name
-            .trim()
-            .trim_start_matches("refs/heads/")
-            .trim_start_matches("heads/")
-            .trim_start_matches("refs/remotes/origin/")
-            .trim_start_matches("origin/");
+        let normalized = Self::normalize_branch_name(branch_name);
 
         if Self::is_branch_protected(branch_name, config) {
             if ctx.sandboxed {

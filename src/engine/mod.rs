@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha1::Digest;
 
 use crate::config::PluginConfig;
@@ -212,6 +212,49 @@ impl<'a> GitEngine<'a> {
             }
         }
         false
+    }
+
+    /// Find the lowest common ancestor (merge base) between two commit hashes
+    pub fn find_merge_base(&self, one: &str, two: &str) -> Option<String> {
+        let mut ancestors_one = HashSet::new();
+        let mut q1 = VecDeque::new();
+        q1.push_back(one.to_string());
+        ancestors_one.insert(one.to_string());
+
+        while let Some(cid) = q1.pop_front() {
+            if let Ok((_, content)) = read_loose_object(&self.git_dir(), &cid) {
+                if let Ok(parsed) = parse_commit(&cid, &content) {
+                    for p in parsed.parents {
+                        if !ancestors_one.contains(&p) {
+                            ancestors_one.insert(p.clone());
+                            q1.push_back(p);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut q2 = VecDeque::new();
+        let mut visited2 = HashSet::new();
+        q2.push_back(two.to_string());
+        visited2.insert(two.to_string());
+
+        while let Some(cid) = q2.pop_front() {
+            if ancestors_one.contains(&cid) {
+                return Some(cid);
+            }
+            if let Ok((_, content)) = read_loose_object(&self.git_dir(), &cid) {
+                if let Ok(parsed) = parse_commit(&cid, &content) {
+                    for p in parsed.parents {
+                        if !visited2.contains(&p) {
+                            visited2.insert(p.clone());
+                            q2.push_back(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     // -----------------------------------------------------------------------
@@ -561,12 +604,41 @@ impl<'a> GitEngine<'a> {
             }
             "tag" => {
                 let text = String::from_utf8_lossy(&content).to_string();
+                let mut target_object = String::new();
+                let mut tag_name = String::new();
+                let mut tagger = String::new();
+                let mut message_lines = Vec::new();
+                let mut in_msg = false;
+
+                for line in text.lines() {
+                    if in_msg {
+                        message_lines.push(line);
+                    } else if line.is_empty() {
+                        in_msg = true;
+                    } else if let Some(stripped) = line.strip_prefix("object ") {
+                        target_object = stripped.trim().to_string();
+                    } else if let Some(stripped) = line.strip_prefix("tag ") {
+                        tag_name = stripped.trim().to_string();
+                    } else if let Some(stripped) = line.strip_prefix("tagger ") {
+                        tagger = stripped.trim().to_string();
+                    }
+                }
+
+                let tag_msg = message_lines.join("\n");
                 let data = json!({
                     "kind": "tag",
                     "hash": hash,
+                    "tag_name": if tag_name.is_empty() { Value::Null } else { json!(tag_name) },
+                    "target_object": if target_object.is_empty() { Value::Null } else { json!(target_object) },
+                    "tagger": if tagger.is_empty() { Value::Null } else { json!(tagger) },
+                    "message": if tag_msg.is_empty() { Value::Null } else { json!(tag_msg) },
                     "raw": text
                 });
-                let summary = format!("Tag {}", &hash[..7.min(hash.len())]);
+                let summary = if !tag_name.is_empty() {
+                    format!("Tag '{tag_name}' -> {}", &target_object[..7.min(target_object.len())])
+                } else {
+                    format!("Tag {}", &hash[..7.min(hash.len())])
+                };
                 Ok(GitToolResult::ok(data, summary))
             }
             "tree" => {
@@ -623,21 +695,32 @@ impl<'a> GitEngine<'a> {
             return Ok(current);
         }
 
-        // Handle ^ operator: e.g. HEAD^, HEAD^^
-        if rev.contains('^') {
-            let caret_count = rev.chars().filter(|&c| c == '^').count();
-            let base = rev.trim_end_matches('^');
-            let mut current = self.rev_parse_hash(base)?;
-            for _ in 0..caret_count {
+        // Handle ^ operator: e.g. HEAD^, HEAD^^, HEAD^1, HEAD^2
+        if let Some(pos) = rev.find('^') {
+            let base = &rev[..pos];
+            let suffix = &rev[pos..];
+            if suffix.chars().all(|c| c == '^') {
+                let caret_count = suffix.len();
+                let mut current = self.rev_parse_hash(base)?;
+                for _ in 0..caret_count {
+                    let (_, content) = read_loose_object(&self.git_dir(), &current)?;
+                    let parsed = parse_commit(&current, &content)?;
+                    if let Some(parent) = parsed.parents.first() {
+                        current = parent.clone();
+                    } else {
+                        return Err(format!("Cannot resolve '{rev}': history too shallow"));
+                    }
+                }
+                return Ok(current);
+            } else if let Ok(parent_idx) = suffix[1..].parse::<usize>() {
+                let current = self.rev_parse_hash(base)?;
                 let (_, content) = read_loose_object(&self.git_dir(), &current)?;
                 let parsed = parse_commit(&current, &content)?;
-                if let Some(parent) = parsed.parents.first() {
-                    current = parent.clone();
-                } else {
-                    return Err(format!("Cannot resolve '{rev}': history too shallow"));
+                if parent_idx == 0 || parent_idx > parsed.parents.len() {
+                    return Err(format!("Cannot resolve '{rev}': parent #{parent_idx} does not exist"));
                 }
+                return Ok(parsed.parents[parent_idx - 1].clone());
             }
-            return Ok(current);
         }
 
         if rev == "HEAD" {
@@ -1089,27 +1172,37 @@ impl<'a> GitEngine<'a> {
         } else if let Some(target_paths) = paths {
             for raw_p in target_paths {
                 let norm = raw_p.trim().trim_start_matches("./").replace('\\', "/");
-                let full_path = self.repo_path.join(&norm);
+                let clean_norm = norm.trim_end_matches('/').to_string();
+                let full_path = self.repo_path.join(&clean_norm);
 
                 if full_path.is_dir() {
-                    // Stage entire subdirectory
+                    let dir_prefix = format!("{clean_norm}/");
+                    // Stage all worktree files under this directory
                     for (rel_path, abs_path) in &worktree_files {
-                        if rel_path.starts_with(&norm) {
+                        if rel_path == &clean_norm || rel_path.starts_with(&dir_prefix) {
                             let bytes = fs::read(abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
                             let blob_sha = write_blob(&self.git_dir(), &bytes)?;
                             index.insert(rel_path.clone(), (0o100644, blob_sha));
                             added.push(rel_path.clone());
                         }
                     }
+                    // Stage any deleted files under this directory that were previously in index
+                    let index_keys: Vec<String> = index.keys().cloned().collect();
+                    for k in index_keys {
+                        if (k == clean_norm || k.starts_with(&dir_prefix)) && !worktree_files.contains_key(&k) {
+                            index.remove(&k);
+                            added.push(format!("deleted: {k}"));
+                        }
+                    }
                 } else if full_path.exists() {
-                    let bytes = fs::read(&full_path).map_err(|e| format!("Failed to read '{norm}': {e}"))?;
+                    let bytes = fs::read(&full_path).map_err(|e| format!("Failed to read '{clean_norm}': {e}"))?;
                     let blob_sha = write_blob(&self.git_dir(), &bytes)?;
-                    index.insert(norm.clone(), (0o100644, blob_sha));
-                    added.push(norm);
-                } else if index.contains_key(&norm) {
+                    index.insert(clean_norm.clone(), (0o100644, blob_sha));
+                    added.push(clean_norm);
+                } else if index.contains_key(&clean_norm) {
                     // Deleted file staged
-                    index.remove(&norm);
-                    added.push(format!("deleted: {norm}"));
+                    index.remove(&clean_norm);
+                    added.push(format!("deleted: {clean_norm}"));
                 }
             }
         }
@@ -1191,7 +1284,11 @@ impl<'a> GitEngine<'a> {
         }
 
         let target = target_ref.unwrap_or("HEAD");
-        let reset_mode = mode.unwrap_or("mixed");
+        let reset_mode = mode.unwrap_or("mixed").trim().to_lowercase();
+        if !["soft", "mixed", "hard"].contains(&reset_mode.as_str()) {
+            return Err(format!("Invalid reset mode '{reset_mode}'. Supported modes: 'soft', 'mixed', 'hard'"));
+        }
+
         let target_hash = self.rev_parse_hash(target)?;
         let target_files = self.get_commit_tree_files(&target_hash)?;
 
@@ -1253,25 +1350,27 @@ impl<'a> GitEngine<'a> {
         }
 
         if directories && !dry_run {
-            // Remove empty directories
+            // Collect all directories in pre-order traversal
+            let mut all_dirs = Vec::new();
             let mut stack = vec![self.repo_path.clone()];
             while let Some(dir) = stack.pop() {
                 if let Ok(entries) = fs::read_dir(&dir) {
-                    let mut is_empty = true;
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
-                            is_empty = false;
                             continue;
                         }
                         if path.is_dir() {
+                            all_dirs.push(path.clone());
                             stack.push(path);
-                            is_empty = false;
-                        } else {
-                            is_empty = false;
                         }
                     }
-                    if is_empty && dir != self.repo_path {
+                }
+            }
+            // Remove empty directories bottom-up (leaf-to-root)
+            for dir in all_dirs.into_iter().rev() {
+                if let Ok(mut entries) = fs::read_dir(&dir) {
+                    if entries.next().is_none() && dir != self.repo_path {
                         let _ = fs::remove_dir(&dir);
                     }
                 }
@@ -1488,7 +1587,11 @@ impl<'a> GitEngine<'a> {
                 Ok(GitToolResult::ok(json!({ "tags": tags }), summary))
             }
             "create" => {
-                let name = tag_name.ok_or_else(|| "tag_name is required to create a tag".to_string())?;
+                let raw_name = tag_name.ok_or_else(|| "tag_name is required to create a tag".to_string())?;
+                let name = raw_name.trim().trim_start_matches("refs/tags/").trim_start_matches("tags/");
+                if name.is_empty() {
+                    return Err("tag_name cannot be empty".to_string());
+                }
                 let target = target_ref.unwrap_or("HEAD");
                 let target_hash = match self.rev_parse_hash(target) {
                     Ok(h) => h,
@@ -1525,7 +1628,8 @@ impl<'a> GitEngine<'a> {
                 ))
             }
             "delete" => {
-                let name = tag_name.ok_or_else(|| "tag_name is required to delete a tag".to_string())?;
+                let raw_name = tag_name.ok_or_else(|| "tag_name is required to delete a tag".to_string())?;
+                let name = raw_name.trim().trim_start_matches("refs/tags/").trim_start_matches("tags/");
                 let tag_file = tags_dir.join(name);
                 let mut deleted = false;
                 if tag_file.exists() {
@@ -1560,6 +1664,10 @@ impl<'a> GitEngine<'a> {
         force: bool,
     ) -> Result<GitToolResult, String> {
         let heads_dir = self.git_dir().join("refs").join("heads");
+        let clean_branch_buf = branch_name.map(|s| s.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/").to_string());
+        let clean_branch = clean_branch_buf.as_deref();
+        let clean_new_buf = new_name.map(|s| s.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/").to_string());
+        let clean_new = clean_new_buf.as_deref();
 
         match action {
             "list" => {
@@ -1580,6 +1688,7 @@ impl<'a> GitEngine<'a> {
                 let packed_refs = self.git_dir().join("packed-refs");
                 if let Ok(content) = fs::read_to_string(&packed_refs) {
                     for line in content.lines() {
+                        let line = line.trim();
                         if let Some(rname) = line.split_whitespace().nth(1) {
                             if let Some(bname) = rname.strip_prefix("refs/heads/") {
                                 if !branch_names.contains(&bname.to_string()) {
@@ -1603,7 +1712,7 @@ impl<'a> GitEngine<'a> {
                 Ok(GitToolResult::ok(json!({ "branches": branches, "current": current_branch }), summary))
             }
             "create" => {
-                let name = branch_name.ok_or_else(|| "branch_name is required to create a branch".to_string())?;
+                let name = clean_branch.ok_or_else(|| "branch_name is required to create a branch".to_string())?;
                 let target = start_point.unwrap_or("HEAD");
                 let hash = match self.rev_parse_hash(target) {
                     Ok(h) => h,
@@ -1631,7 +1740,7 @@ impl<'a> GitEngine<'a> {
                 ))
             }
             "delete" => {
-                let name = branch_name.ok_or_else(|| "branch_name is required to delete a branch".to_string())?;
+                let name = clean_branch.ok_or_else(|| "branch_name is required to delete a branch".to_string())?;
                 let (current_opt, _) = self.get_head().unwrap_or((None, None));
                 if current_opt.as_deref() == Some(name) {
                     return Err(format!("Cannot delete current checked out branch '{name}'"));
@@ -1654,8 +1763,8 @@ impl<'a> GitEngine<'a> {
                 Ok(GitToolResult::ok(json!({ "deleted_branch": name }), summary))
             }
             "rename" => {
-                let old = branch_name.ok_or_else(|| "branch_name is required for rename".to_string())?;
-                let new = new_name.ok_or_else(|| "new_name is required for rename".to_string())?;
+                let old = clean_branch.ok_or_else(|| "branch_name is required for rename".to_string())?;
+                let new = clean_new.ok_or_else(|| "new_name is required for rename".to_string())?;
                 let old_file = heads_dir.join(old);
                 let new_file = heads_dir.join(new);
 
@@ -1689,22 +1798,27 @@ impl<'a> GitEngine<'a> {
         create_new: bool,
         start_point: Option<&str>,
     ) -> Result<GitToolResult, String> {
-        if create_new {
-            self.branch("create", Some(branch_name), None, start_point, false)?;
+        let clean_branch = branch_name.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/");
+        if clean_branch.is_empty() {
+            return Err("branch_name cannot be empty".to_string());
         }
 
-        let branch_file = self.git_dir().join("refs").join("heads").join(branch_name);
-        if !branch_file.exists() && !create_new && self.find_packed_ref(&format!("refs/heads/{branch_name}")).is_none() {
-            return Err(format!("Branch '{branch_name}' does not exist"));
+        if create_new {
+            self.branch("create", Some(clean_branch), None, start_point, false)?;
+        }
+
+        let branch_file = self.git_dir().join("refs").join("heads").join(clean_branch);
+        if !branch_file.exists() && !create_new && self.find_packed_ref(&format!("refs/heads/{clean_branch}")).is_none() {
+            return Err(format!("Branch '{clean_branch}' does not exist"));
         }
 
         // Update HEAD
         let head_file = self.git_dir().join("HEAD");
-        fs::write(&head_file, format!("ref: refs/heads/{branch_name}\n"))
+        fs::write(&head_file, format!("ref: refs/heads/{clean_branch}\n"))
             .map_err(|e| format!("Failed to update HEAD: {e}"))?;
 
         // If target branch has a commit, checkout its tree to index and worktree
-        if let Ok(branch_hash) = self.rev_parse_hash(branch_name) {
+        if let Ok(branch_hash) = self.rev_parse_hash(clean_branch) {
             let old_files = self.read_index();
             let target_files = self.get_commit_tree_files(&branch_hash).unwrap_or_default();
             self.write_index(&target_files)?;
@@ -1729,10 +1843,10 @@ impl<'a> GitEngine<'a> {
             }
         }
 
-        let summary = format!("Switched to branch '{branch_name}'");
+        let summary = format!("Switched to branch '{clean_branch}'");
         Ok(GitToolResult::ok(
             json!({
-                "branch": branch_name,
+                "branch": clean_branch,
                 "created": create_new
             }),
             summary,
@@ -1802,9 +1916,95 @@ impl<'a> GitEngine<'a> {
         }
 
         // 3-way file merge
-        let mut merged_files = head_files.clone();
-        for (rel_path, (mode, sha)) in &source_files {
-            merged_files.insert(rel_path.clone(), (*mode, sha.clone()));
+        let base_files = self
+            .find_merge_base(&head_hash, &source_hash)
+            .and_then(|base_hash| self.get_commit_tree_files(&base_hash).ok())
+            .unwrap_or_default();
+
+        let mut merged_files = BTreeMap::new();
+        let all_keys: HashSet<String> = head_files
+            .keys()
+            .chain(source_files.keys())
+            .chain(base_files.keys())
+            .cloned()
+            .collect();
+
+        for key in all_keys {
+            let base_entry = base_files.get(&key);
+            let head_entry = head_files.get(&key);
+            let source_entry = source_files.get(&key);
+
+            match (base_entry, head_entry, source_entry) {
+                // Unchanged in base, head, source
+                (Some(b), Some(h), Some(s)) if b == h && b == s => {
+                    merged_files.insert(key, h.clone());
+                }
+                // Modified only in source (unchanged in head) -> use source
+                (Some(b), Some(h), Some(s)) if b == h => {
+                    merged_files.insert(key, s.clone());
+                }
+                // Modified only in head (unchanged in source) -> use head
+                (Some(b), Some(h), Some(s)) if b == s => {
+                    merged_files.insert(key, h.clone());
+                }
+                // Modified in both head and source -> prefer source if different
+                (Some(_), Some(h), Some(s)) => {
+                    if h == s {
+                        merged_files.insert(key, h.clone());
+                    } else {
+                        merged_files.insert(key, s.clone());
+                    }
+                }
+                // Deleted in source, unchanged in head -> deleted in merge
+                (Some(b), Some(h), None) if b == h => {
+                    // Omit from merged_files
+                }
+                // Deleted in source, modified in head -> keep head
+                (Some(_), Some(h), None) => {
+                    merged_files.insert(key, h.clone());
+                }
+                // Deleted in head, unchanged in source -> remain deleted
+                (Some(b), None, Some(s)) if b == s => {
+                    // Omit from merged_files
+                }
+                // Deleted in head, modified in source -> use source
+                (Some(_), None, Some(s)) => {
+                    merged_files.insert(key, s.clone());
+                }
+                // Added only in source -> add to merge
+                (None, None, Some(s)) => {
+                    merged_files.insert(key, s.clone());
+                }
+                // Added only in head -> keep in merge
+                (None, Some(h), None) => {
+                    merged_files.insert(key, h.clone());
+                }
+                // Added in both head and source
+                (None, Some(h), Some(s)) => {
+                    if h == s {
+                        merged_files.insert(key, h.clone());
+                    } else {
+                        merged_files.insert(key, s.clone());
+                    }
+                }
+                // Deleted in both
+                (Some(_), None, None) => {}
+                (None, None, None) => {}
+            }
+        }
+
+        // Remove files that exist in current worktree/head but are omitted from merged_files
+        for old_path in head_files.keys() {
+            if !merged_files.contains_key(old_path) {
+                let full_path = self.repo_path.join(old_path);
+                if full_path.exists() {
+                    let _ = fs::remove_file(full_path);
+                }
+            }
+        }
+
+        // Write merged files to disk
+        for (rel_path, (_, sha)) in &merged_files {
             let (_, content) = read_loose_object(&self.git_dir(), sha)?;
             let full_path = self.repo_path.join(rel_path);
             if let Some(p) = full_path.parent() {
