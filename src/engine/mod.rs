@@ -1351,7 +1351,7 @@ impl<'a> GitEngine<'a> {
             }
         }
 
-        if directories && !dry_run {
+        if directories {
             // Collect all directories in pre-order traversal
             let mut all_dirs = Vec::new();
             let mut stack = vec![self.repo_path.clone()];
@@ -1373,7 +1373,12 @@ impl<'a> GitEngine<'a> {
             for dir in all_dirs.into_iter().rev() {
                 if let Ok(mut entries) = fs::read_dir(&dir) {
                     if entries.next().is_none() && dir != self.repo_path {
-                        let _ = fs::remove_dir(&dir);
+                        if let Ok(rel) = dir.strip_prefix(&self.repo_path) {
+                            cleaned.push(rel.to_string_lossy().replace('\\', "/"));
+                        }
+                        if !dry_run {
+                            let _ = fs::remove_dir(&dir);
+                        }
                     }
                 }
             }
@@ -1562,11 +1567,7 @@ impl<'a> GitEngine<'a> {
             "list" => {
                 let mut tags = Vec::new();
                 if tags_dir.exists() {
-                    if let Ok(entries) = fs::read_dir(&tags_dir) {
-                        for entry in entries.flatten() {
-                            tags.push(entry.file_name().to_string_lossy().to_string());
-                        }
-                    }
+                    collect_refs_recursively(&tags_dir, &tags_dir, &mut tags);
                 }
 
                 // Also check packed-refs
@@ -1601,7 +1602,10 @@ impl<'a> GitEngine<'a> {
                     Err(e) => return Err(e),
                 };
 
-                fs::create_dir_all(&tags_dir).map_err(|e| format!("Failed to create refs/tags: {e}"))?;
+                let tag_file = tags_dir.join(name);
+                if let Some(parent) = tag_file.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create refs/tags: {e}"))?;
+                }
 
                 let tag_hash = if let Some(msg) = message {
                     // Create annotated tag object
@@ -1615,7 +1619,7 @@ impl<'a> GitEngine<'a> {
                     target_hash.clone()
                 };
 
-                fs::write(tags_dir.join(name), format!("{tag_hash}\n"))
+                fs::write(&tag_file, format!("{tag_hash}\n"))
                     .map_err(|e| format!("Failed to write tag ref: {e}"))?;
 
                 let summary = format!("Created tag '{name}' at {target}");
@@ -1679,11 +1683,7 @@ impl<'a> GitEngine<'a> {
 
                 let mut branch_names = Vec::new();
                 if heads_dir.exists() {
-                    if let Ok(entries) = fs::read_dir(&heads_dir) {
-                        for entry in entries.flatten() {
-                            branch_names.push(entry.file_name().to_string_lossy().to_string());
-                        }
-                    }
+                    collect_refs_recursively(&heads_dir, &heads_dir, &mut branch_names);
                 }
 
                 // Also check packed-refs
@@ -1727,7 +1727,9 @@ impl<'a> GitEngine<'a> {
                     return Err(format!("Branch '{name}' already exists. Use force: true to overwrite."));
                 }
 
-                fs::create_dir_all(&heads_dir).map_err(|e| format!("Failed to create refs/heads: {e}"))?;
+                if let Some(parent) = target_file.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create branch directory: {e}"))?;
+                }
                 fs::write(&target_file, format!("{hash}\n"))
                     .map_err(|e| format!("Failed to write branch ref: {e}"))?;
 
@@ -1767,17 +1769,25 @@ impl<'a> GitEngine<'a> {
             "rename" => {
                 let old = clean_branch.ok_or_else(|| "branch_name is required for rename".to_string())?;
                 let new = clean_new.ok_or_else(|| "new_name is required for rename".to_string())?;
-                let old_file = heads_dir.join(old);
+                
+                let old_hash = self.rev_parse_hash(old).map_err(|_| format!("Branch '{old}' not found."))?;
+                
                 let new_file = heads_dir.join(new);
-
-                if !old_file.exists() {
-                    return Err(format!("Branch '{old}' not found."));
-                }
                 if new_file.exists() && !force {
                     return Err(format!("Branch '{new}' already exists."));
                 }
-
-                fs::rename(&old_file, &new_file).map_err(|e| format!("Failed to rename branch: {e}"))?;
+                
+                if let Some(parent) = new_file.parent() {
+                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create new branch directory: {e}"))?;
+                }
+                
+                fs::write(&new_file, format!("{old_hash}\n")).map_err(|e| format!("Failed to write new branch: {e}"))?;
+                
+                let old_file = heads_dir.join(old);
+                if old_file.exists() {
+                    let _ = fs::remove_file(&old_file);
+                }
+                let _ = self.remove_packed_ref(&format!("refs/heads/{old}"));
 
                 // Update HEAD if current branch was renamed
                 let (current_opt, _) = self.get_head().unwrap_or((None, None));
@@ -2236,3 +2246,19 @@ impl<'a> GitEngine<'a> {
         }
     }
 }
+
+fn collect_refs_recursively(base_dir: &std::path::Path, current_dir: &std::path::Path, refs: &mut Vec<String>) {
+    if let Ok(entries) = fs::read_dir(current_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_refs_recursively(base_dir, &path, refs);
+            } else if path.is_file() {
+                if let Ok(rel) = path.strip_prefix(base_dir) {
+                    refs.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+}
+
