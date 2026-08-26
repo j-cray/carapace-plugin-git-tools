@@ -70,6 +70,12 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
 - The plugin manifest ID is **`git-tools`**.
 - The WASM component filename stem must match the plugin ID: **`git-tools.wasm`** (not `carapace_plugin_git_tools.wasm`).
 
+### 4. Component Export Naming & Inline World Interfaces
+- **Issue**: Carapace's plugin runtime (`carapace/src/plugins/runtime.rs`) looks up plugin exports by interface name using exact string matching on component export instances via `component.get_export_index(None, "tool")` and `component.get_export_index(None, "manifest")`.
+- **Consequence**: When a WIT world defines exports using package references like `export manifest; export tool;` within `package carapace:plugin@1.0.0;`, WASM component tooling encodes them with fully qualified package names (`"carapace:plugin/manifest@1.0.0"` and `"carapace:plugin/tool@1.0.0"`). Carapace's exact instance lookup then fails with:
+  `Binding error: Function call error: exported interface 'tool' not found`
+- **Solution**: The `tool-plugin` world in `wit/plugin.wit` must export `manifest` and `tool` as inline named interfaces (`export manifest: interface { ... }` and `export tool: interface { ... }`). This ensures the final WASM component exports top-level instances named `"manifest"` and `"tool"`, matching Carapace's index lookup, and generates Rust bindings under `bindings::exports::manifest` and `bindings::exports::tool`.
+
 ## Development & Build Guidelines
 
 ### Managing Dependencies with Nix
@@ -87,7 +93,7 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
   ```
 
 ### Inspecting Component Interface
-- Verify that only `carapace:plugin/host` and `carapace:plugin/types` are imported (zero `wasi:*` imports):
+- Verify that only `carapace:plugin/host` and `carapace:plugin/types` are imported (zero `wasi:*` imports) and that top-level exported instances are named `manifest` and `tool`:
   ```bash
   wasm-tools component wit target/wasm32-unknown-unknown/release/git-tools.wasm
   ```
