@@ -5,7 +5,7 @@ use crate::config::PluginConfig;
 pub struct SafetyChecker;
 
 impl SafetyChecker {
-    /// Resolve and validate repository path against allowed roots.
+    /// Resolve and validate repository path against allowed roots purely in-memory.
     pub fn resolve_repo_path(
         repo_path: Option<&str>,
         config: &PluginConfig,
@@ -21,46 +21,14 @@ impl SafetyChecker {
         };
 
         let path = PathBuf::from(raw_path);
-        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let abs_path = if path.is_relative() {
-            base_dir.join(&path)
-        } else {
-            path
-        };
-
-        // Canonicalize if path exists; if not, canonicalize closest existing ancestor
-        let resolved = if let Ok(canonical) = abs_path.canonicalize() {
-            canonical
-        } else {
-            // Find closest existing ancestor to resolve any symlinks along the path
-            let mut current = abs_path.as_path();
-            let mut uncreated = Vec::new();
-            while !current.exists() && current.parent().is_some() {
-                if let Some(file_name) = current.file_name() {
-                    uncreated.push(file_name);
-                }
-                current = current.parent().unwrap();
-            }
-
-            let mut resolved_base = current.canonicalize().unwrap_or_else(|_| normalize_path(current));
-            for segment in uncreated.into_iter().rev() {
-                resolved_base.push(segment);
-            }
-            normalize_path(&resolved_base)
-        };
+        let resolved = normalize_path(&path);
 
         // If allowed_roots is specified, enforce that resolved path starts with an allowed root
         if !config.allowed_roots.is_empty() {
             let mut is_allowed = false;
             for root_str in &config.allowed_roots {
-                let root_path = PathBuf::from(root_str);
-                let abs_root = if root_path.is_relative() {
-                    base_dir.join(&root_path)
-                } else {
-                    root_path
-                };
-                let canonical_root = abs_root.canonicalize().unwrap_or_else(|_| normalize_path(&abs_root));
-                if resolved.starts_with(&canonical_root) {
+                let root_path = normalize_path(Path::new(root_str));
+                if resolved.starts_with(&root_path) {
                     is_allowed = true;
                     break;
                 }

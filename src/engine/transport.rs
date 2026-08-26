@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::PathBuf;
 use serde_json::json;
 
 use crate::bindings::carapace::plugin::host::{self, HttpRequest};
 use crate::config::PluginConfig;
+use crate::engine::vfs;
 use crate::types::GitToolResult;
 
 pub struct RemoteTransport<'a> {
@@ -19,7 +19,7 @@ impl<'a> RemoteTransport<'a> {
 
     fn git_dir(&self) -> PathBuf {
         let dot_git = self.repo_path.join(".git");
-        if dot_git.is_dir() {
+        if vfs::is_dir(&dot_git) {
             dot_git
         } else {
             self.repo_path.clone()
@@ -34,8 +34,8 @@ impl<'a> RemoteTransport<'a> {
         url: Option<&str>,
     ) -> Result<GitToolResult, String> {
         let config_file = self.git_dir().join("config");
-        let content = if config_file.exists() {
-            fs::read_to_string(&config_file).unwrap_or_default()
+        let content = if vfs::exists(&config_file) {
+            vfs::read_to_string(&config_file).unwrap_or_default()
         } else {
             String::new()
         };
@@ -83,9 +83,9 @@ impl<'a> RemoteTransport<'a> {
                     "[remote \"{name}\"]\n\turl = {target_url}\n\tfetch = +refs/heads/*:refs/remotes/{name}/*\n"
                 ));
 
-                fs::create_dir_all(self.git_dir())
+                vfs::create_dir_all(self.git_dir())
                     .map_err(|e| format!("Failed to create git directory: {e}"))?;
-                fs::write(&config_file, new_config)
+                vfs::write(&config_file, new_config)
                     .map_err(|e| format!("Failed to write .git/config: {e}"))?;
 
                 let summary = format!("Added remote '{name}' -> {target_url}");
@@ -116,12 +116,12 @@ impl<'a> RemoteTransport<'a> {
                     }
                 }
 
-                fs::write(&config_file, filtered_lines.join("\n"))
+                vfs::write(&config_file, filtered_lines.join("\n"))
                     .map_err(|e| format!("Failed to update .git/config: {e}"))?;
 
                 let remotes_dir = self.git_dir().join("refs").join("remotes").join(name);
-                if remotes_dir.exists() {
-                    let _ = fs::remove_dir_all(&remotes_dir);
+                if vfs::exists(&remotes_dir) {
+                    let _ = vfs::remove_dir_all(&remotes_dir);
                 }
 
                 let summary = format!("Removed remote '{name}'");
@@ -169,28 +169,28 @@ impl<'a> RemoteTransport<'a> {
     ) -> Result<GitToolResult, String> {
         let dest = self.repo_path.clone();
 
-        fs::create_dir_all(&dest).map_err(|e| format!("Failed to create clone destination directory: {e}"))?;
+        vfs::create_dir_all(&dest).map_err(|e| format!("Failed to create clone destination directory: {e}"))?;
 
         // Initialize repository structure
         let git_dir = dest.join(".git");
-        fs::create_dir_all(git_dir.join("refs").join("heads"))
+        vfs::create_dir_all(git_dir.join("refs").join("heads"))
             .map_err(|e| format!("Failed to create refs/heads: {e}"))?;
-        fs::create_dir_all(git_dir.join("refs").join("remotes").join("origin"))
+        vfs::create_dir_all(git_dir.join("refs").join("remotes").join("origin"))
             .map_err(|e| format!("Failed to create refs/remotes/origin: {e}"))?;
-        fs::create_dir_all(git_dir.join("refs").join("tags"))
+        vfs::create_dir_all(git_dir.join("refs").join("tags"))
             .map_err(|e| format!("Failed to create refs/tags: {e}"))?;
-        fs::create_dir_all(git_dir.join("objects"))
+        vfs::create_dir_all(git_dir.join("objects"))
             .map_err(|e| format!("Failed to create objects directory: {e}"))?;
 
         let initial_branch = branch.unwrap_or("main");
-        fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{initial_branch}\n"))
+        vfs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{initial_branch}\n"))
             .map_err(|e| format!("Failed to write HEAD: {e}"))?;
 
         // Write remote configuration
         let config_content = format!(
             "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = {url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
         );
-        fs::write(git_dir.join("config"), config_content)
+        vfs::write(git_dir.join("config"), config_content)
             .map_err(|e| format!("Failed to write .git/config: {e}"))?;
 
         // Check remote info/refs over HTTP
@@ -218,13 +218,13 @@ impl<'a> RemoteTransport<'a> {
                         if let Some(bname) = ref_name.strip_prefix("refs/heads/") {
                             let rfile = git_dir.join("refs").join("remotes").join("origin").join(bname);
                             if let Some(p) = rfile.parent() {
-                                let _ = fs::create_dir_all(p);
+                                let _ = vfs::create_dir_all(p);
                             }
-                            let _ = fs::write(&rfile, format!("{sha}\n"));
+                            let _ = vfs::write(&rfile, format!("{sha}\n"));
 
                             if bname == initial_branch {
                                 let lfile = git_dir.join("refs").join("heads").join(bname);
-                                let _ = fs::write(&lfile, format!("{sha}\n"));
+                                let _ = vfs::write(&lfile, format!("{sha}\n"));
                             }
                         }
                     }
@@ -286,36 +286,36 @@ impl<'a> RemoteTransport<'a> {
                     if let Some(ref body_bytes) = resp.body {
                         let refs = parse_smart_http_refs(body_bytes);
                         let remotes_dir = self.git_dir().join("refs").join("remotes").join(remote_name);
-                        let _ = fs::create_dir_all(&remotes_dir);
+                        let _ = vfs::create_dir_all(&remotes_dir);
 
                         for (ref_name, sha) in &refs {
                             if let Some(bname) = ref_name.strip_prefix("refs/heads/") {
                                 if branch.is_none() || branch == Some(bname) {
                                     let rfile = remotes_dir.join(bname);
                                     if let Some(p) = rfile.parent() {
-                                        let _ = fs::create_dir_all(p);
+                                        let _ = vfs::create_dir_all(p);
                                     }
-                                    let _ = fs::write(&rfile, format!("{sha}\n"));
+                                    let _ = vfs::write(&rfile, format!("{sha}\n"));
                                     updated_refs.insert(format!("{remote_name}/{bname}"), sha.clone());
                                 }
                             } else if tags && ref_name.starts_with("refs/tags/") {
                                 let tag_name = &ref_name[10..];
                                 let tfile = self.git_dir().join("refs").join("tags").join(tag_name);
                                 if let Some(p) = tfile.parent() {
-                                    let _ = fs::create_dir_all(p);
+                                    let _ = vfs::create_dir_all(p);
                                 }
-                                let _ = fs::write(&tfile, format!("{sha}\n"));
+                                let _ = vfs::write(&tfile, format!("{sha}\n"));
                                 updated_refs.insert(format!("tags/{tag_name}"), sha.clone());
                             }
                         }
 
-                        if prune && remotes_dir.exists() {
-                            if let Ok(entries) = fs::read_dir(&remotes_dir) {
-                                for entry in entries.flatten() {
-                                    let fname = entry.file_name().to_string_lossy().to_string();
+                        if prune && vfs::exists(&remotes_dir) {
+                            if let Ok(entries) = vfs::read_dir(&remotes_dir) {
+                                for path in entries {
+                                    let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                                     let full_ref = format!("refs/heads/{fname}");
                                     if !refs.contains_key(&full_ref) {
-                                        let _ = fs::remove_file(entry.path());
+                                        let _ = vfs::remove_file(&path);
                                     }
                                 }
                             }
@@ -413,12 +413,12 @@ impl<'a> RemoteTransport<'a> {
                 Ok(resp) => {
                     // If successfully validated remote, update local tracking ref
                     let branch_file = self.git_dir().join("refs").join("heads").join(branch_name);
-                    if let Ok(hash) = fs::read_to_string(&branch_file) {
+                    if let Ok(hash) = vfs::read_to_string(&branch_file) {
                         let remote_ref_file = self.git_dir().join("refs").join("remotes").join(remote_name).join(branch_name);
                         if let Some(p) = remote_ref_file.parent() {
-                            let _ = fs::create_dir_all(p);
+                            let _ = vfs::create_dir_all(p);
                         }
-                        let _ = fs::write(&remote_ref_file, hash);
+                        let _ = vfs::write(&remote_ref_file, hash);
                     }
                     format!("HTTP {}", resp.status)
                 }

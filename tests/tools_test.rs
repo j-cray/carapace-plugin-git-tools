@@ -1,13 +1,13 @@
-use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-use carapace_plugin_git_tools::bindings::exports::carapace::plugin::tool::ToolContext;
-use carapace_plugin_git_tools::config::PluginConfig;
-use carapace_plugin_git_tools::engine::transport::{parse_smart_http_refs, RemoteTransport};
-use carapace_plugin_git_tools::engine::GitEngine;
-use carapace_plugin_git_tools::safety::{normalize_path, SafetyChecker};
-use carapace_plugin_git_tools::tools;
+use git_tools::bindings::exports::carapace::plugin::tool::ToolContext;
+use git_tools::config::PluginConfig;
+use git_tools::engine::transport::{parse_smart_http_refs, RemoteTransport};
+use git_tools::engine::vfs;
+use git_tools::engine::GitEngine;
+use git_tools::safety::{normalize_path, SafetyChecker};
+use git_tools::tools;
 
 #[test]
 fn test_tool_definitions_schema_validity() {
@@ -85,7 +85,7 @@ fn test_git_init_and_status() {
 
     // Create a new file
     let test_file = repo_path.join("hello.txt");
-    fs::write(&test_file, "Hello, world!\n").expect("Failed to write test file");
+    vfs::write(&test_file, "Hello, world!\n").expect("Failed to write test file");
 
     // Status should report untracked file
     let status_dirty = engine.status().expect("Failed to get dirty status");
@@ -110,9 +110,9 @@ fn test_commit_log_show_blame_revparse() {
 
     // Create nested directory and files
     let src_dir = repo_path.join("src");
-    fs::create_dir_all(&src_dir).unwrap();
-    fs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
-    fs::write(repo_path.join("README.md"), "# Test Project\n").unwrap();
+    vfs::create_dir_all(&src_dir).unwrap();
+    vfs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n").unwrap();
+    vfs::write(repo_path.join("README.md"), "# Test Project\n").unwrap();
 
     // Stage all
     let add_res = engine.add(None, true).expect("Add all failed");
@@ -128,7 +128,7 @@ fn test_commit_log_show_blame_revparse() {
     let hash1 = commit1.data["commit_hash"].as_str().unwrap().to_string();
 
     // Modify file
-    fs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    // addition\n    a + b\n}\n").unwrap();
+    vfs::write(src_dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    // addition\n    a + b\n}\n").unwrap();
     let add_res2 = engine.add(Some(vec!["src/lib.rs".to_string()]), false).unwrap();
     assert!(add_res2.success);
 
@@ -185,7 +185,7 @@ fn test_branch_checkout_merge_revert() {
     let _ = engine.init_repo(false).expect("Init failed");
 
     // Commit on main
-    fs::write(repo_path.join("main.txt"), "base content\n").unwrap();
+    vfs::write(repo_path.join("main.txt"), "base content\n").unwrap();
     engine.add(None, true).unwrap();
     let base_commit = engine.commit("initial on main", false).unwrap();
     assert!(base_commit.success);
@@ -200,7 +200,7 @@ fn test_branch_checkout_merge_revert() {
     assert!(branches.iter().any(|b| b["name"] == "feature-auth" && b["current"] == true));
 
     // Commit on feature branch
-    fs::write(repo_path.join("auth.txt"), "auth module\n").unwrap();
+    vfs::write(repo_path.join("auth.txt"), "auth module\n").unwrap();
     engine.add(None, true).unwrap();
     let feat_commit = engine.commit("feat: add auth", false).unwrap();
     assert!(feat_commit.success);
@@ -208,17 +208,17 @@ fn test_branch_checkout_merge_revert() {
     // Switch back to main
     let checkout_main = engine.checkout("main", false, None).unwrap();
     assert!(checkout_main.success);
-    assert!(!repo_path.join("auth.txt").exists(), "auth.txt should not exist on main before merge");
+    assert!(!vfs::exists(&repo_path.join("auth.txt")), "auth.txt should not exist on main before merge");
 
     // Merge feature-auth into main
     let merge_res = engine.merge("feature-auth", Some("Merge feature-auth into main"), false, false).unwrap();
     assert!(merge_res.success);
-    assert!(repo_path.join("auth.txt").exists(), "auth.txt should exist on main after merge");
+    assert!(vfs::exists(&repo_path.join("auth.txt")), "auth.txt should exist on main after merge");
 
     // Revert the auth commit
     let revert_res = engine.revert("feature-auth", false).unwrap();
     assert!(revert_res.success);
-    assert!(!repo_path.join("auth.txt").exists(), "auth.txt should be removed after reverting auth commit");
+    assert!(!vfs::exists(&repo_path.join("auth.txt")), "auth.txt should be removed after reverting auth commit");
 }
 
 #[test]
@@ -230,12 +230,12 @@ fn test_restore_reset_clean() {
 
     let _ = engine.init_repo(false).expect("Init failed");
 
-    fs::write(repo_path.join("data.txt"), "original data\n").unwrap();
+    vfs::write(repo_path.join("data.txt"), "original data\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("initial commit", false).unwrap();
 
     // Modify data.txt
-    fs::write(repo_path.join("data.txt"), "modified data\n").unwrap();
+    vfs::write(repo_path.join("data.txt"), "modified data\n").unwrap();
 
     // Stage change
     engine.add(Some(vec!["data.txt".to_string()]), false).unwrap();
@@ -252,21 +252,21 @@ fn test_restore_reset_clean() {
     // Restore working tree (discard modifications)
     let restore_work = engine.restore(vec!["data.txt".to_string()], false).unwrap();
     assert!(restore_work.success);
-    assert_eq!(fs::read_to_string(repo_path.join("data.txt")).unwrap(), "original data\n");
+    assert_eq!(vfs::read_to_string(repo_path.join("data.txt")).unwrap(), "original data\n");
 
     // Test clean
-    fs::write(repo_path.join("temp1.tmp"), "scratch\n").unwrap();
-    fs::write(repo_path.join("temp2.tmp"), "scratch\n").unwrap();
+    vfs::write(repo_path.join("temp1.tmp"), "scratch\n").unwrap();
+    vfs::write(repo_path.join("temp2.tmp"), "scratch\n").unwrap();
 
     // Dry run clean
     let clean_dry = engine.clean(true, false).unwrap();
     assert_eq!(clean_dry.data["cleaned"].as_array().unwrap().len(), 2);
-    assert!(repo_path.join("temp1.tmp").exists());
+    assert!(vfs::exists(&repo_path.join("temp1.tmp")));
 
     // Actual clean
     let clean_real = engine.clean(false, false).unwrap();
     assert_eq!(clean_real.data["cleaned"].as_array().unwrap().len(), 2);
-    assert!(!repo_path.join("temp1.tmp").exists());
+    assert!(!vfs::exists(&repo_path.join("temp1.tmp")));
 }
 
 #[test]
@@ -278,7 +278,7 @@ fn test_tags_and_stash_flow() {
 
     let _ = engine.init_repo(false).expect("Init failed");
 
-    fs::write(repo_path.join("file.txt"), "v1\n").unwrap();
+    vfs::write(repo_path.join("file.txt"), "v1\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("v1 commit", false).unwrap();
 
@@ -293,12 +293,12 @@ fn test_tags_and_stash_flow() {
     assert!(tags.iter().any(|t| t == "v0.1.0"));
 
     // Modify file for stash
-    fs::write(repo_path.join("file.txt"), "v1 with experimental changes\n").unwrap();
+    vfs::write(repo_path.join("file.txt"), "v1 with experimental changes\n").unwrap();
 
     // Stash save
     let stash_save = engine.stash("save", Some("WIP experimental"), None, true).unwrap();
     assert!(stash_save.success);
-    assert_eq!(fs::read_to_string(repo_path.join("file.txt")).unwrap(), "v1\n");
+    assert_eq!(vfs::read_to_string(repo_path.join("file.txt")).unwrap(), "v1\n");
 
     // Stash list
     let stash_list = engine.stash("list", None, None, false).unwrap();
@@ -309,7 +309,7 @@ fn test_tags_and_stash_flow() {
     // Stash pop
     let stash_pop = engine.stash("pop", None, Some(0), false).unwrap();
     assert!(stash_pop.success);
-    assert_eq!(fs::read_to_string(repo_path.join("file.txt")).unwrap(), "v1 with experimental changes\n");
+    assert_eq!(vfs::read_to_string(repo_path.join("file.txt")).unwrap(), "v1 with experimental changes\n");
 
     // Tag delete
     let tag_del = engine.tag("delete", Some("v0.1.0"), None, None).unwrap();
@@ -362,7 +362,7 @@ fn test_safety_path_containment_and_normalization() {
 
     // Valid path inside allowed root
     let inside_path = allowed_root.join("sub-repo");
-    fs::create_dir_all(&inside_path).unwrap();
+    vfs::create_dir_all(&inside_path).unwrap();
     let resolved = SafetyChecker::resolve_repo_path(Some(&inside_path.display().to_string()), &config);
     assert!(resolved.is_ok());
 
@@ -439,7 +439,7 @@ fn test_dispatch_integration() {
     engine.init_repo(false).unwrap();
 
     // Create file
-    fs::write(repo_path.join("app.rs"), "fn run() {}\n").unwrap();
+    vfs::write(repo_path.join("app.rs"), "fn run() {}\n").unwrap();
 
     // Test git_status dispatch with repo_path
     let res_status = tools::dispatch("git_status", &format!(r#"{{"repo_path": "{repo_str}"}}"#), &config, &ctx);
@@ -503,19 +503,19 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     engine.init_repo(false).unwrap();
 
     // Commit 1: create file1.txt and file2.txt
-    fs::write(repo_path.join("file1.txt"), "line 1\n").unwrap();
-    fs::write(repo_path.join("file2.txt"), "hello\n").unwrap();
+    vfs::write(repo_path.join("file1.txt"), "line 1\n").unwrap();
+    vfs::write(repo_path.join("file2.txt"), "hello\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("commit 1", false).unwrap();
 
     // Commit 2: update file1.txt, add file3.txt
-    fs::write(repo_path.join("file1.txt"), "line 1\nline 2\n").unwrap();
-    fs::write(repo_path.join("file3.txt"), "third file\n").unwrap();
+    vfs::write(repo_path.join("file1.txt"), "line 1\nline 2\n").unwrap();
+    vfs::write(repo_path.join("file3.txt"), "third file\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("commit 2", false).unwrap();
 
     // Commit 3: update file3.txt
-    fs::write(repo_path.join("file3.txt"), "third file modified\n").unwrap();
+    vfs::write(repo_path.join("file3.txt"), "third file modified\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("commit 3", false).unwrap();
 
@@ -534,7 +534,7 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     assert!(diff_range.data["diff"].as_str().unwrap().contains("file3.txt"));
 
     // Test git_add with deleted file
-    fs::remove_file(repo_path.join("file2.txt")).unwrap();
+    vfs::remove_file(repo_path.join("file2.txt")).unwrap();
     let add_del = engine.add(None, true).unwrap();
     let staged_paths = add_del.data["staged_paths"].as_array().unwrap();
     assert!(staged_paths.iter().any(|p| p.as_str() == Some("deleted: file2.txt")));
@@ -543,11 +543,11 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     engine.commit("commit 4: remove file2", false).unwrap();
 
     // Test reset --hard clean up of extra untracked files
-    fs::write(repo_path.join("untracked_extra.txt"), "should be deleted").unwrap();
+    vfs::write(repo_path.join("untracked_extra.txt"), "should be deleted").unwrap();
     let reset_res = engine.reset(None, Some("hard"), Some("HEAD~1")).unwrap();
     assert!(reset_res.success);
-    assert!(!repo_path.join("untracked_extra.txt").exists(), "reset --hard should remove untracked working-tree file");
-    assert!(repo_path.join("file2.txt").exists(), "file2.txt should be restored after resetting to HEAD~1");
+    assert!(!vfs::exists(&repo_path.join("untracked_extra.txt")), "reset --hard should remove untracked working-tree file");
+    assert!(vfs::exists(&repo_path.join("file2.txt")), "file2.txt should be restored after resetting to HEAD~1");
 
     // Test branch rename protection
     let rename_protected = tools::dispatch(
@@ -571,13 +571,13 @@ fn test_stash_cleanliness_and_packed_refs() {
     let engine = GitEngine::new(repo_path.clone(), &config);
     engine.init_repo(false).unwrap();
 
-    fs::write(repo_path.join("clean.txt"), "clean base\n").unwrap();
+    vfs::write(repo_path.join("clean.txt"), "clean base\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("base commit", false).unwrap();
 
     // Dirty worktree and dirty staged index
-    fs::write(repo_path.join("clean.txt"), "dirty modification\n").unwrap();
-    fs::write(repo_path.join("dirty_new.txt"), "dirty new file\n").unwrap();
+    vfs::write(repo_path.join("clean.txt"), "dirty modification\n").unwrap();
+    vfs::write(repo_path.join("dirty_new.txt"), "dirty new file\n").unwrap();
     engine.add(Some(vec!["clean.txt".to_string()]), false).unwrap();
 
     // Stash save with include_untracked: true
@@ -585,9 +585,9 @@ fn test_stash_cleanliness_and_packed_refs() {
     assert!(stash_save.success);
 
     // Verify working tree is restored to clean base state
-    let content_after = fs::read_to_string(repo_path.join("clean.txt")).unwrap();
+    let content_after = vfs::read_to_string(repo_path.join("clean.txt")).unwrap();
     assert_eq!(content_after, "clean base\n");
-    assert!(!repo_path.join("dirty_new.txt").exists());
+    assert!(!vfs::exists(&repo_path.join("dirty_new.txt")));
 
     // Verify status is completely clean
     let status = engine.status().unwrap();
@@ -596,13 +596,13 @@ fn test_stash_cleanliness_and_packed_refs() {
     // Stash pop
     let stash_pop = engine.stash("pop", None, Some(0), false).unwrap();
     assert!(stash_pop.success);
-    let content_popped = fs::read_to_string(repo_path.join("clean.txt")).unwrap();
+    let content_popped = vfs::read_to_string(repo_path.join("clean.txt")).unwrap();
     assert_eq!(content_popped, "dirty modification\n");
 
     // Test packed-refs deletion and rev-parse
     let packed_refs_file = repo_path.join(".git").join("packed-refs");
     let commit_hash = engine.rev_parse_hash("HEAD").unwrap();
-    fs::write(&packed_refs_file, format!("# packed-refs with: peeled fully-peeled sorted\n{commit_hash} refs/tags/v1.0.0-packed\n{commit_hash} refs/heads/packed-feature\n")).unwrap();
+    vfs::write(&packed_refs_file, format!("# packed-refs with: peeled fully-peeled sorted\n{commit_hash} refs/tags/v1.0.0-packed\n{commit_hash} refs/heads/packed-feature\n")).unwrap();
 
     // Verify rev-parse finds packed tag and branch
     assert_eq!(engine.rev_parse_hash("v1.0.0-packed").unwrap(), commit_hash);
@@ -628,20 +628,20 @@ fn test_rev_parse_caret_syntax_and_merge_parents() {
     engine.init_repo(false).unwrap();
 
     // Commit 1 on main
-    fs::write(repo_path.join("base.txt"), "base\n").unwrap();
+    vfs::write(repo_path.join("base.txt"), "base\n").unwrap();
     engine.add(None, true).unwrap();
     let commit1 = engine.commit("commit 1 on main", false).unwrap();
     let hash1 = commit1.data["commit_hash"].as_str().unwrap().to_string();
 
     // Commit 2 on main
-    fs::write(repo_path.join("main_extra.txt"), "extra\n").unwrap();
+    vfs::write(repo_path.join("main_extra.txt"), "extra\n").unwrap();
     engine.add(None, true).unwrap();
     let commit2 = engine.commit("commit 2 on main", false).unwrap();
     let hash2 = commit2.data["commit_hash"].as_str().unwrap().to_string();
 
     // Create and checkout branch feat
     engine.checkout("feat", true, Some(&hash1)).unwrap();
-    fs::write(repo_path.join("feat.txt"), "feat content\n").unwrap();
+    vfs::write(repo_path.join("feat.txt"), "feat content\n").unwrap();
     engine.add(None, true).unwrap();
     let feat_commit = engine.commit("feat commit", false).unwrap();
     let feat_hash = feat_commit.data["commit_hash"].as_str().unwrap().to_string();
@@ -675,10 +675,10 @@ fn test_directory_staging_isolation_and_deletion() {
     engine.init_repo(false).unwrap();
 
     // Create src/lib.rs and src_extra/other.rs
-    fs::create_dir_all(repo_path.join("src")).unwrap();
-    fs::create_dir_all(repo_path.join("src_extra")).unwrap();
-    fs::write(repo_path.join("src").join("lib.rs"), "pub fn run() {}\n").unwrap();
-    fs::write(repo_path.join("src_extra").join("other.rs"), "pub fn extra() {}\n").unwrap();
+    vfs::create_dir_all(repo_path.join("src")).unwrap();
+    vfs::create_dir_all(repo_path.join("src_extra")).unwrap();
+    vfs::write(repo_path.join("src").join("lib.rs"), "pub fn run() {}\n").unwrap();
+    vfs::write(repo_path.join("src_extra").join("other.rs"), "pub fn extra() {}\n").unwrap();
 
     // Stage only "src" directory
     let add_res = engine.add(Some(vec!["src".to_string()]), false).unwrap();
@@ -691,7 +691,7 @@ fn test_directory_staging_isolation_and_deletion() {
     engine.commit("initial src commit", false).unwrap();
 
     // Delete src/lib.rs and stage "src" directory
-    fs::remove_file(repo_path.join("src").join("lib.rs")).unwrap();
+    vfs::remove_file(repo_path.join("src").join("lib.rs")).unwrap();
     let add_del = engine.add(Some(vec!["src".to_string()]), false).unwrap();
     let staged_del = add_del.data["staged_paths"].as_array().unwrap();
     assert!(staged_del.iter().any(|p| p.as_str() == Some("deleted: src/lib.rs")));
@@ -706,22 +706,22 @@ fn test_three_way_merge_file_deletion_and_reconciliation() {
     engine.init_repo(false).unwrap();
 
     // Initial commit on main: file1.txt and file2.txt
-    fs::write(repo_path.join("file1.txt"), "original file1\n").unwrap();
-    fs::write(repo_path.join("file2.txt"), "original file2 to be deleted\n").unwrap();
+    vfs::write(repo_path.join("file1.txt"), "original file1\n").unwrap();
+    vfs::write(repo_path.join("file2.txt"), "original file2 to be deleted\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("base commit", false).unwrap();
 
     // Feature branch: delete file2.txt, modify file1.txt, add file3.txt
     engine.checkout("feat-changes", true, None).unwrap();
-    fs::remove_file(repo_path.join("file2.txt")).unwrap();
-    fs::write(repo_path.join("file1.txt"), "modified file1 on feat\n").unwrap();
-    fs::write(repo_path.join("file3.txt"), "new file3 on feat\n").unwrap();
+    vfs::remove_file(repo_path.join("file2.txt")).unwrap();
+    vfs::write(repo_path.join("file1.txt"), "modified file1 on feat\n").unwrap();
+    vfs::write(repo_path.join("file3.txt"), "new file3 on feat\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("feat updates", false).unwrap();
 
     // Switch back to main: add file4.txt
     engine.checkout("main", false, None).unwrap();
-    fs::write(repo_path.join("file4.txt"), "file4 on main\n").unwrap();
+    vfs::write(repo_path.join("file4.txt"), "file4 on main\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("main update", false).unwrap();
 
@@ -731,12 +731,12 @@ fn test_three_way_merge_file_deletion_and_reconciliation() {
 
     // Verify 3-way reconciliation:
     // file2.txt should be deleted
-    assert!(!repo_path.join("file2.txt").exists(), "file2.txt should be removed after merge");
+    assert!(!vfs::exists(&repo_path.join("file2.txt")), "file2.txt should be removed after merge");
     // file1.txt should have feature modifications
-    assert_eq!(fs::read_to_string(repo_path.join("file1.txt")).unwrap(), "modified file1 on feat\n");
+    assert_eq!(vfs::read_to_string(repo_path.join("file1.txt")).unwrap(), "modified file1 on feat\n");
     // file3.txt and file4.txt should both exist
-    assert!(repo_path.join("file3.txt").exists(), "file3.txt from feat should exist");
-    assert!(repo_path.join("file4.txt").exists(), "file4.txt from main should exist");
+    assert!(vfs::exists(&repo_path.join("file3.txt")), "file3.txt from feat should exist");
+    assert!(vfs::exists(&repo_path.join("file4.txt")), "file4.txt from main should exist");
 }
 
 #[test]
@@ -748,21 +748,21 @@ fn test_clean_nested_empty_directories() {
     engine.init_repo(false).unwrap();
 
     // Initial commit
-    fs::write(repo_path.join("tracked.txt"), "tracked\n").unwrap();
+    vfs::write(repo_path.join("tracked.txt"), "tracked\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("init", false).unwrap();
 
     // Create deep nested directory tree with an untracked file
     let deep_dir = repo_path.join("deep").join("nested").join("folder");
-    fs::create_dir_all(&deep_dir).unwrap();
-    fs::write(deep_dir.join("scratch.tmp"), "temporary data\n").unwrap();
+    vfs::create_dir_all(&deep_dir).unwrap();
+    vfs::write(deep_dir.join("scratch.tmp"), "temporary data\n").unwrap();
 
     // Clean with directories: true
     let clean_res = engine.clean(false, true).unwrap();
     assert!(clean_res.success);
 
     // Deep directory structure should be completely pruned
-    assert!(!repo_path.join("deep").exists(), "Empty nested directory tree should be pruned completely");
+    assert!(!vfs::exists(&repo_path.join("deep")), "Empty nested directory tree should be pruned completely");
 }
 
 #[test]
@@ -785,7 +785,7 @@ fn test_branch_rename_target_protection() {
     let engine = GitEngine::new(repo_path.clone(), &config);
     engine.init_repo(false).unwrap();
 
-    fs::write(repo_path.join("app.txt"), "app\n").unwrap();
+    vfs::write(repo_path.join("app.txt"), "app\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("init", false).unwrap();
 
@@ -823,7 +823,7 @@ fn test_annotated_tag_show_inspection() {
     let engine = GitEngine::new(repo_path.clone(), &config);
     engine.init_repo(false).unwrap();
 
-    fs::write(repo_path.join("version.txt"), "1.0.0\n").unwrap();
+    vfs::write(repo_path.join("version.txt"), "1.0.0\n").unwrap();
     engine.add(None, true).unwrap();
     let commit = engine.commit("release commit", false).unwrap();
     let commit_hash = commit.data["commit_hash"].as_str().unwrap().to_string();
@@ -849,7 +849,7 @@ fn test_reset_invalid_mode() {
     let engine = GitEngine::new(repo_path.clone(), &config);
     engine.init_repo(false).unwrap();
 
-    fs::write(repo_path.join("file.txt"), "hello\n").unwrap();
+    vfs::write(repo_path.join("file.txt"), "hello\n").unwrap();
     engine.add(None, true).unwrap();
     engine.commit("init", false).unwrap();
 

@@ -9,3 +9,4 @@ result-*
 /target/
 **/*.rs.bk
 Cargo.lock.bak
+*.wasm

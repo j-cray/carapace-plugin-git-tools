@@ -1,7 +1,5 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::fs;
 use std::path::PathBuf;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::Digest;
@@ -14,12 +12,13 @@ const REGULAR_FILE_MODE: u32 = 0o100_644;
 
 pub mod objects;
 pub mod transport;
+pub mod vfs;
 
 use objects::{
     build_tree_hierarchy, compute_unified_diff, hash_and_write_object, parse_commit,
     read_loose_object, read_tree_all_files, scan_worktree_files, write_blob, write_commit_object,
-    ParsedCommit,
 };
+use vfs::{current_timestamp, format_timestamp};
 
 pub struct GitEngine<'a> {
     pub repo_path: PathBuf,
@@ -44,7 +43,7 @@ impl<'a> GitEngine<'a> {
     /// Git directory path (.git)
     pub fn git_dir(&self) -> PathBuf {
         let dot_git = self.repo_path.join(".git");
-        if dot_git.is_dir() {
+        if vfs::is_dir(&dot_git) {
             dot_git
         } else {
             // Bare repository
@@ -53,32 +52,34 @@ impl<'a> GitEngine<'a> {
     }
 
     /// Open repository or return a friendly error
-    pub fn open_repo(&self) -> Result<gix::Repository, String> {
-        gix::open(&self.repo_path)
-            .map_err(|e| format!("Failed to open Git repository at '{}': {}", self.repo_path.display(), e))
+    pub fn open_repo(&self) -> Result<(), String> {
+        let head_file = self.git_dir().join("HEAD");
+        if !vfs::exists(&head_file) {
+            return Err(format!("Not a git repository: '{}' (missing HEAD)", self.repo_path.display()));
+        }
+        Ok(())
     }
 
     /// Initialize a new repository
     pub fn init_repo(&self, bare: bool) -> Result<GitToolResult, String> {
-        let repo = if bare {
-            gix::init_bare(&self.repo_path)
-                .map_err(|e| format!("Failed to init bare repository at '{}': {}", self.repo_path.display(), e))?
-        } else {
-            gix::init(&self.repo_path)
-                .map_err(|e| format!("Failed to init repository at '{}': {}", self.repo_path.display(), e))?
-        };
-
-        // Ensure objects, refs/heads, refs/tags exist
         let git_dir = if bare { self.repo_path.clone() } else { self.repo_path.join(".git") };
-        let _ = fs::create_dir_all(git_dir.join("objects"));
-        let _ = fs::create_dir_all(git_dir.join("refs").join("heads"));
-        let _ = fs::create_dir_all(git_dir.join("refs").join("tags"));
+        vfs::create_dir_all(git_dir.join("objects"))?;
+        vfs::create_dir_all(git_dir.join("refs").join("heads"))?;
+        vfs::create_dir_all(git_dir.join("refs").join("tags"))?;
 
-        let summary = format!("Initialized empty Git repository at '{}'", repo.path().display());
+        let head_content = "ref: refs/heads/main\n";
+        vfs::write(git_dir.join("HEAD"), head_content)?;
+
+        let config_content = format!(
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = {bare}\n"
+        );
+        vfs::write(git_dir.join("config"), config_content)?;
+
+        let summary = format!("Initialized empty Git repository at '{}'", git_dir.display());
         Ok(GitToolResult::ok(
             json!({
                 "path": self.repo_path.display().to_string(),
-                "git_dir": repo.path().display().to_string(),
+                "git_dir": git_dir.display().to_string(),
                 "bare": bare
             }),
             summary,
@@ -92,19 +93,19 @@ impl<'a> GitEngine<'a> {
     /// Read HEAD ref: returns (branch_name_if_symbolic, commit_hash_if_pointed)
     pub fn get_head(&self) -> Result<(Option<String>, Option<String>), String> {
         let head_file = self.git_dir().join("HEAD");
-        if !head_file.exists() {
+        if !vfs::exists(&head_file) {
             return Err("Not a git repository (HEAD not found)".to_string());
         }
 
-        let content = fs::read_to_string(&head_file)
+        let content = vfs::read_to_string(&head_file)
             .map_err(|e| format!("Failed to read HEAD: {e}"))?;
         let trimmed = content.trim();
 
         if let Some(branch_ref) = trimmed.strip_prefix("ref: refs/heads/") {
             let branch_name = branch_ref.to_string();
             let branch_file = self.git_dir().join("refs").join("heads").join(&branch_name);
-            let commit_hash = if branch_file.exists() {
-                fs::read_to_string(&branch_file).ok().map(|s| s.trim().to_string())
+            let commit_hash = if vfs::exists(&branch_file) {
+                vfs::read_to_string(&branch_file).ok().map(|s| s.trim().to_string())
             } else {
                 self.find_packed_ref(&format!("refs/heads/{branch_name}"))
             };
@@ -120,19 +121,19 @@ impl<'a> GitEngine<'a> {
     /// Update HEAD or current branch to point to new commit hash
     pub fn update_head_ref(&self, new_commit_hex: &str) -> Result<(), String> {
         let head_file = self.git_dir().join("HEAD");
-        let content = fs::read_to_string(&head_file).unwrap_or_default();
+        let content = vfs::read_to_string(&head_file).unwrap_or_default();
         let trimmed = content.trim();
 
         if let Some(branch_ref) = trimmed.strip_prefix("ref: refs/heads/") {
             let branch_file = self.git_dir().join("refs").join("heads").join(branch_ref);
             if let Some(parent) = branch_file.parent() {
-                let _ = fs::create_dir_all(parent);
+                let _ = vfs::create_dir_all(parent);
             }
-            fs::write(&branch_file, format!("{new_commit_hex}\n"))
+            vfs::write(&branch_file, format!("{new_commit_hex}\n"))
                 .map_err(|e| format!("Failed to update branch ref '{branch_ref}': {e}"))?;
         } else {
             // Detached HEAD
-            fs::write(&head_file, format!("{new_commit_hex}\n"))
+            vfs::write(&head_file, format!("{new_commit_hex}\n"))
                 .map_err(|e| format!("Failed to update HEAD: {e}"))?;
         }
 
@@ -141,7 +142,7 @@ impl<'a> GitEngine<'a> {
 
     fn find_packed_ref(&self, ref_name: &str) -> Option<String> {
         let packed_refs = self.git_dir().join("packed-refs");
-        if let Ok(content) = fs::read_to_string(&packed_refs) {
+        if let Ok(content) = vfs::read_to_string(&packed_refs) {
             for line in content.lines() {
                 let line = line.trim();
                 if line.starts_with('#') || line.starts_with('^') {
@@ -160,10 +161,10 @@ impl<'a> GitEngine<'a> {
 
     fn remove_packed_ref(&self, ref_name: &str) -> Result<bool, String> {
         let packed_refs = self.git_dir().join("packed-refs");
-        if !packed_refs.exists() {
+        if !vfs::exists(&packed_refs) {
             return Ok(false);
         }
-        let content = fs::read_to_string(&packed_refs)
+        let content = vfs::read_to_string(&packed_refs)
             .map_err(|e| format!("Failed to read packed-refs: {e}"))?;
         let mut new_lines = Vec::new();
         let mut found = false;
@@ -183,7 +184,7 @@ impl<'a> GitEngine<'a> {
             new_lines.push(line.to_string());
         }
         if found {
-            fs::write(&packed_refs, new_lines.join("\n") + "\n")
+            vfs::write(&packed_refs, new_lines.join("\n") + "\n")
                 .map_err(|e| format!("Failed to write packed-refs: {e}"))?;
         }
         Ok(found)
@@ -271,8 +272,8 @@ impl<'a> GitEngine<'a> {
     /// Read staged index entries: relative path -> (mode, blob_sha1)
     pub fn read_index(&self) -> BTreeMap<String, (u32, String)> {
         let file = self.index_file();
-        if file.exists() {
-            if let Ok(content) = fs::read_to_string(&file) {
+        if vfs::exists(&file) {
+            if let Ok(content) = vfs::read_to_string(&file) {
                 if let Ok(map) = serde_json::from_str::<BTreeMap<String, (u32, String)>>(&content) {
                     return map;
                 }
@@ -296,7 +297,7 @@ impl<'a> GitEngine<'a> {
         let file = self.index_file();
         let json_str = serde_json::to_string_pretty(index)
             .map_err(|e| format!("Failed to serialize index: {e}"))?;
-        fs::write(&file, json_str).map_err(|e| format!("Failed to write index file: {e}"))?;
+        vfs::write(&file, json_str).map_err(|e| format!("Failed to write index file: {e}"))?;
         Ok(())
     }
 
@@ -370,7 +371,7 @@ impl<'a> GitEngine<'a> {
         // 2. Check unstaged modifications & deleted: Worktree vs Index
         for (rel_path, (_, idx_sha)) in &index_files {
             if let Some(abs_path) = worktree_files.get(rel_path) {
-                if let Ok(bytes) = fs::read(abs_path) {
+                if let Ok(bytes) = vfs::read(abs_path) {
                     let mut hasher = sha1::Sha1::new();
                     hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
                     hasher.update(&bytes);
@@ -510,9 +511,7 @@ impl<'a> GitEngine<'a> {
 
                     if author_matches {
                         let short_hash = &current_id[..7.min(current_id.len())];
-                        let date_str = DateTime::from_timestamp(parsed.author_date, 0)
-                            .map(|dt: DateTime<Utc>| dt.to_rfc3339())
-                            .unwrap_or_else(|| parsed.author_date.to_string());
+                        let date_str = format_timestamp(parsed.author_date);
 
                         commits.push(json!({
                             "hash": current_id,
@@ -558,9 +557,7 @@ impl<'a> GitEngine<'a> {
             "commit" => {
                 let parsed = parse_commit(&hash, &content)?;
                 let short_hash = &hash[..7.min(hash.len())];
-                let date_str = DateTime::from_timestamp(parsed.author_date, 0)
-                    .map(|dt: DateTime<Utc>| dt.to_rfc3339())
-                    .unwrap_or_else(|| parsed.author_date.to_string());
+                let date_str = format_timestamp(parsed.author_date);
 
                 // Compute diff introduced by this commit against its primary parent
                 let parent_files = if let Some(parent_hash) = parsed.parents.first() {
@@ -741,10 +738,10 @@ impl<'a> GitEngine<'a> {
             let prefix = &rev[0..2];
             let suffix = &rev[2..];
             let obj_dir = self.git_dir().join("objects").join(prefix);
-            if obj_dir.exists() {
-                if let Ok(entries) = fs::read_dir(obj_dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
+            if vfs::exists(&obj_dir) {
+                if let Ok(entries) = vfs::read_dir(&obj_dir) {
+                    for path in entries {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                         if name.starts_with(suffix) {
                             return Ok(format!("{prefix}{name}"));
                         }
@@ -755,8 +752,8 @@ impl<'a> GitEngine<'a> {
 
         // Direct file lookup under .git/
         let direct_ref_file = self.git_dir().join(rev);
-        if direct_ref_file.is_file() {
-            if let Ok(content) = fs::read_to_string(&direct_ref_file) {
+        if vfs::is_file(&direct_ref_file) {
+            if let Ok(content) = vfs::read_to_string(&direct_ref_file) {
                 let trimmed = content.trim();
                 if let Some(sym) = trimmed.strip_prefix("ref: ") {
                     return self.rev_parse_hash(sym);
@@ -768,8 +765,8 @@ impl<'a> GitEngine<'a> {
 
         // Check branch ref
         let branch_file = self.git_dir().join("refs").join("heads").join(rev);
-        if branch_file.is_file() {
-            if let Ok(content) = fs::read_to_string(&branch_file) {
+        if vfs::is_file(&branch_file) {
+            if let Ok(content) = vfs::read_to_string(&branch_file) {
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
                     return Ok(trimmed.to_string());
@@ -779,8 +776,8 @@ impl<'a> GitEngine<'a> {
 
         // Check tag ref
         let tag_file = self.git_dir().join("refs").join("tags").join(rev);
-        if tag_file.is_file() {
-            if let Ok(content) = fs::read_to_string(&tag_file) {
+        if vfs::is_file(&tag_file) {
+            if let Ok(content) = vfs::read_to_string(&tag_file) {
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
                     return Ok(trimmed.to_string());
@@ -790,8 +787,8 @@ impl<'a> GitEngine<'a> {
 
         // Check remote tracking ref
         let remote_file = self.git_dir().join("refs").join("remotes").join(rev);
-        if remote_file.is_file() {
-            if let Ok(content) = fs::read_to_string(&remote_file) {
+        if vfs::is_file(&remote_file) {
+            if let Ok(content) = vfs::read_to_string(&remote_file) {
                 let trimmed = content.trim();
                 if !trimmed.is_empty() {
                     return Ok(trimmed.to_string());
@@ -806,14 +803,6 @@ impl<'a> GitEngine<'a> {
             .or_else(|| self.find_packed_ref(rev))
         {
             return Ok(h);
-        }
-
-        // Fallback to gix rev_parse_single
-        if let Ok(repo) = self.open_repo() {
-            use gix::bstr::ByteSlice;
-            if let Ok(obj) = repo.rev_parse_single(rev.as_bytes().as_bstr()) {
-                return Ok(obj.to_hex().to_string());
-            }
         }
 
         Err(format!("Could not resolve revision '{revision}'"))
@@ -837,50 +826,37 @@ impl<'a> GitEngine<'a> {
         ))
     }
 
-    /// Blame a file with commit hashes, authors, and dates
+    /// Blame line-by-line annotation
     pub fn blame(&self, file_path: &str) -> Result<GitToolResult, String> {
         let norm_path = file_path.trim().trim_start_matches("./").replace('\\', "/");
         let abs_path = self.repo_path.join(&norm_path);
 
-        if !abs_path.exists() {
-            return Err(format!("File not found: '{norm_path}'"));
+        if !vfs::is_file(&abs_path) {
+            return Err(format!("File '{norm_path}' does not exist in repository."));
         }
 
-        let content = fs::read_to_string(&abs_path)
-            .map_err(|e| format!("Failed to read file '{norm_path}': {e}"))?;
+        let content = vfs::read_to_string(&abs_path)
+            .map_err(|e| format!("Failed to read file for blame '{norm_path}': {e}"))?;
         let lines: Vec<&str> = content.lines().collect();
 
-        // Trace commits in history to find who touched this file
-        let mut history_commits = Vec::new();
-        if let Ok((_, Some(head_hash))) = self.get_head() {
-            let mut queue = VecDeque::new();
-            let mut visited = HashSet::new();
-            queue.push_back(head_hash.clone());
-            visited.insert(head_hash);
+        // Traverse commits from HEAD to find introducing commits
+        let (_, head_opt) = self.get_head()?;
+        let head_hash = head_opt.ok_or_else(|| "Repository has no commits for blame.".to_string())?;
 
-            while let Some(cid) = queue.pop_front() {
-                if let Ok((_, cdata)) = read_loose_object(&self.git_dir(), &cid) {
-                    if let Ok(p) = parse_commit(&cid, &cdata) {
-                        history_commits.push(p.clone());
-                        for parent in p.parents {
-                            if !visited.contains(&parent) {
-                                visited.insert(parent.clone());
-                                queue.push_back(parent);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let mut commit_history = Vec::new();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+        queue.push_back(head_hash.clone());
+        visited.insert(head_hash);
 
-        // Pre-fetch commit blob contents once per history commit for performance
-        let mut commit_blobs: Vec<(ParsedCommit, String)> = Vec::new();
-        for commit in &history_commits {
-            if let Ok(files) = self.get_commit_tree_files(&commit.hash) {
-                if let Some((_, blob_sha)) = files.get(&norm_path) {
-                    if let Ok((_, bdata)) = read_loose_object(&self.git_dir(), blob_sha) {
-                        if let Ok(txt) = String::from_utf8(bdata) {
-                            commit_blobs.push((commit.clone(), txt));
+        while let Some(cid) = queue.pop_front() {
+            if let Ok((_, cdata)) = read_loose_object(&self.git_dir(), &cid) {
+                if let Ok(parsed) = parse_commit(&cid, &cdata) {
+                    commit_history.push(parsed.clone());
+                    for parent in parsed.parents {
+                        if !visited.contains(&parent) {
+                            visited.insert(parent.clone());
+                            queue.push_back(parent);
                         }
                     }
                 }
@@ -888,23 +864,26 @@ impl<'a> GitEngine<'a> {
         }
 
         let mut annotated_lines = Vec::new();
-
-        for (idx, line) in lines.iter().enumerate() {
+        for (idx, &line) in lines.iter().enumerate() {
             let mut matched_commit = None;
-
-            // Search history commits from most recent to oldest
-            for commit_blob in &commit_blobs {
-                if commit_blob.1.lines().any(|l| l == *line) {
-                    matched_commit = Some(commit_blob.0.clone());
-                    break;
+            for c in commit_history.iter().rev() {
+                if let Ok(files) = self.get_commit_tree_files(&c.hash) {
+                    if let Some((_, sha)) = files.get(&norm_path) {
+                        if let Ok((_, blob_data)) = read_loose_object(&self.git_dir(), sha) {
+                            if let Ok(txt) = String::from_utf8(blob_data) {
+                                if txt.lines().any(|l| l == line) {
+                                    matched_commit = Some(c);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             if let Some(c) = matched_commit {
                 let short_hash = &c.hash[..7.min(c.hash.len())];
-                let date_str = DateTime::from_timestamp(c.author_date, 0)
-                    .map(|dt: DateTime<Utc>| dt.to_rfc3339())
-                    .unwrap_or_else(|| c.author_date.to_string());
+                let date_str = format_timestamp(c.author_date);
 
                 annotated_lines.push(json!({
                     "line_number": idx + 1,
@@ -915,12 +894,13 @@ impl<'a> GitEngine<'a> {
                     "content": line
                 }));
             } else {
+                let now_ts = current_timestamp();
                 annotated_lines.push(json!({
                     "line_number": idx + 1,
                     "commit_hash": "0000000000000000000000000000000000000000",
                     "short_hash": "0000000",
                     "author": format!("{} <{}>", self.config.author_name, self.config.author_email),
-                    "date": Utc::now().to_rfc3339(),
+                    "date": format_timestamp(now_ts),
                     "content": line
                 }));
             }
@@ -998,7 +978,7 @@ impl<'a> GitEngine<'a> {
                 });
 
                 let new_txt = if compare_with_worktree {
-                    worktree_files.get(key).and_then(|abs| fs::read_to_string(abs).ok())
+                    worktree_files.get(key).and_then(|abs| vfs::read_to_string(abs).ok())
                 } else {
                     new_tree_files.as_ref().unwrap().get(key).and_then(|(_, sha)| {
                         read_loose_object(&self.git_dir(), sha).ok().and_then(|(_, b)| String::from_utf8(b).ok())
@@ -1091,7 +1071,7 @@ impl<'a> GitEngine<'a> {
                 });
 
                 let new_txt = worktree_files.get(key).and_then(|abs| {
-                    fs::read_to_string(abs).ok()
+                    vfs::read_to_string(abs).ok()
                 });
 
                 let (file_diff, ins, del) = compute_unified_diff(key, old_txt.as_deref(), new_txt.as_deref());
@@ -1166,7 +1146,7 @@ impl<'a> GitEngine<'a> {
             }
             // Stage all files from worktree
             for (rel_path, abs_path) in worktree_files {
-                let bytes = fs::read(&abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
+                let bytes = vfs::read(&abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
                 let blob_sha = write_blob(&self.git_dir(), &bytes)?;
                 index.insert(rel_path.clone(), (REGULAR_FILE_MODE, blob_sha));
                 added.push(rel_path);
@@ -1177,12 +1157,12 @@ impl<'a> GitEngine<'a> {
                 let clean_norm = norm.trim_end_matches('/').to_string();
                 let full_path = self.repo_path.join(&clean_norm);
 
-                if full_path.is_dir() {
+                if vfs::is_dir(&full_path) {
                     let dir_prefix = format!("{clean_norm}/");
                     // Stage all worktree files under this directory
                     for (rel_path, abs_path) in &worktree_files {
                         if rel_path == &clean_norm || rel_path.starts_with(&dir_prefix) {
-                            let bytes = fs::read(abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
+                            let bytes = vfs::read(abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
                             let blob_sha = write_blob(&self.git_dir(), &bytes)?;
                             index.insert(rel_path.clone(), (REGULAR_FILE_MODE, blob_sha));
                             added.push(rel_path.clone());
@@ -1196,8 +1176,8 @@ impl<'a> GitEngine<'a> {
                             added.push(format!("deleted: {k}"));
                         }
                     }
-                } else if full_path.exists() {
-                    let bytes = fs::read(&full_path).map_err(|e| format!("Failed to read '{clean_norm}': {e}"))?;
+                } else if vfs::exists(&full_path) {
+                    let bytes = vfs::read(&full_path).map_err(|e| format!("Failed to read '{clean_norm}': {e}"))?;
                     let blob_sha = write_blob(&self.git_dir(), &bytes)?;
                     index.insert(clean_norm.clone(), (REGULAR_FILE_MODE, blob_sha));
                     added.push(clean_norm);
@@ -1246,9 +1226,9 @@ impl<'a> GitEngine<'a> {
                     let (_, content) = read_loose_object(&self.git_dir(), sha)?;
                     let full_path = self.repo_path.join(&norm);
                     if let Some(parent) = full_path.parent() {
-                        let _ = fs::create_dir_all(parent);
+                        let _ = vfs::create_dir_all(parent);
                     }
-                    fs::write(&full_path, content).map_err(|e| format!("Failed to restore file '{norm}': {e}"))?;
+                    vfs::write(&full_path, content).map_err(|e| format!("Failed to restore file '{norm}': {e}"))?;
                     restored.push(norm);
                 }
             }
@@ -1308,8 +1288,8 @@ impl<'a> GitEngine<'a> {
             for rel_path in current_worktree.keys() {
                 if !target_files.contains_key(rel_path) {
                     let full_path = self.repo_path.join(rel_path);
-                    if full_path.is_file() {
-                        let _ = fs::remove_file(full_path);
+                    if vfs::is_file(&full_path) {
+                        let _ = vfs::remove_file(&full_path);
                     }
                 }
             }
@@ -1319,9 +1299,9 @@ impl<'a> GitEngine<'a> {
                 let (_, content) = read_loose_object(&self.git_dir(), sha)?;
                 let full_path = self.repo_path.join(rel_path);
                 if let Some(parent) = full_path.parent() {
-                    let _ = fs::create_dir_all(parent);
+                    let _ = vfs::create_dir_all(parent);
                 }
-                fs::write(&full_path, content).map_err(|e| format!("Failed to write '{rel_path}': {e}"))?;
+                vfs::write(&full_path, content).map_err(|e| format!("Failed to write '{rel_path}': {e}"))?;
             }
         }
 
@@ -1346,7 +1326,7 @@ impl<'a> GitEngine<'a> {
             if !index.contains_key(&rel_path) {
                 cleaned.push(rel_path);
                 if !dry_run {
-                    let _ = fs::remove_file(abs_path);
+                    let _ = vfs::remove_file(abs_path);
                 }
             }
         }
@@ -1356,13 +1336,12 @@ impl<'a> GitEngine<'a> {
             let mut all_dirs = Vec::new();
             let mut stack = vec![self.repo_path.clone()];
             while let Some(dir) = stack.pop() {
-                if let Ok(entries) = fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
+                if let Ok(entries) = vfs::read_dir(&dir) {
+                    for path in entries {
                         if path.file_name().and_then(|n| n.to_str()) == Some(".git") {
                             continue;
                         }
-                        if path.is_dir() {
+                        if vfs::is_dir(&path) {
                             all_dirs.push(path.clone());
                             stack.push(path);
                         }
@@ -1371,13 +1350,13 @@ impl<'a> GitEngine<'a> {
             }
             // Remove empty directories bottom-up (leaf-to-root)
             for dir in all_dirs.into_iter().rev() {
-                if let Ok(mut entries) = fs::read_dir(&dir) {
-                    if entries.next().is_none() && dir != self.repo_path {
+                if let Ok(entries) = vfs::read_dir(&dir) {
+                    if entries.is_empty() && dir != self.repo_path {
                         if let Ok(rel) = dir.strip_prefix(&self.repo_path) {
                             cleaned.push(rel.to_string_lossy().replace('\\', "/"));
                         }
                         if !dry_run {
-                            let _ = fs::remove_dir(&dir);
+                            let _ = vfs::remove_dir_all(&dir);
                         }
                     }
                 }
@@ -1437,14 +1416,15 @@ impl<'a> GitEngine<'a> {
 
         // Check if MERGE_HEAD exists
         let merge_head_file = self.git_dir().join("MERGE_HEAD");
-        if merge_head_file.exists() {
-            if let Ok(merge_head) = fs::read_to_string(&merge_head_file) {
+        if vfs::exists(&merge_head_file) {
+            if let Ok(merge_head) = vfs::read_to_string(&merge_head_file) {
                 parents.push(merge_head.trim().to_string());
             }
-            let _ = fs::remove_file(&merge_head_file);
+            let _ = vfs::remove_file(&merge_head_file);
         }
 
-        let now = Utc::now();
+        let now_ts = current_timestamp();
+        let date_str = format_timestamp(now_ts);
         let author_name = &self.config.author_name;
         let author_email = &self.config.author_email;
 
@@ -1455,7 +1435,7 @@ impl<'a> GitEngine<'a> {
             author_name,
             author_email,
             message,
-            now.timestamp(),
+            now_ts,
         )?;
 
         // Update branch ref / HEAD
@@ -1473,8 +1453,8 @@ impl<'a> GitEngine<'a> {
                 "message": message,
                 "tree": tree_hex,
                 "parents": parents,
-                "timestamp": now.timestamp(),
-                "date": now.to_rfc3339()
+                "timestamp": now_ts,
+                "date": date_str
             }),
             summary,
         ))
@@ -1504,7 +1484,7 @@ impl<'a> GitEngine<'a> {
                     if parent_sha != commit_sha {
                         index.insert(key.clone(), (*parent_mode, parent_sha.clone()));
                         let (_, bdata) = read_loose_object(&self.git_dir(), parent_sha)?;
-                        fs::write(self.repo_path.join(key), bdata).map_err(|e| e.to_string())?;
+                        vfs::write(self.repo_path.join(key), bdata).map_err(|e| e.to_string())?;
                         reverted_paths.push(key.clone());
                     }
                 }
@@ -1514,17 +1494,17 @@ impl<'a> GitEngine<'a> {
                     let (_, bdata) = read_loose_object(&self.git_dir(), parent_sha)?;
                     let full = self.repo_path.join(key);
                     if let Some(p) = full.parent() {
-                        let _ = fs::create_dir_all(p);
+                        let _ = vfs::create_dir_all(p);
                     }
-                    fs::write(&full, bdata).map_err(|e| e.to_string())?;
+                    vfs::write(&full, bdata).map_err(|e| e.to_string())?;
                     reverted_paths.push(key.clone());
                 }
                 (None, Some(_)) => {
                     // File was added in commit; remove it
                     index.remove(key);
                     let full = self.repo_path.join(key);
-                    if full.exists() {
-                        let _ = fs::remove_file(&full);
+                    if vfs::exists(&full) {
+                        let _ = vfs::remove_file(&full);
                     }
                     reverted_paths.push(key.clone());
                 }
@@ -1566,13 +1546,13 @@ impl<'a> GitEngine<'a> {
         match action {
             "list" => {
                 let mut tags = Vec::new();
-                if tags_dir.exists() {
+                if vfs::exists(&tags_dir) {
                     collect_refs_recursively(&tags_dir, &tags_dir, &mut tags);
                 }
 
                 // Also check packed-refs
                 let packed_refs = self.git_dir().join("packed-refs");
-                if let Ok(content) = fs::read_to_string(&packed_refs) {
+                if let Ok(content) = vfs::read_to_string(&packed_refs) {
                     for line in content.lines() {
                         let line = line.trim();
                         if let Some(tag_ref) = line.split_whitespace().nth(1) {
@@ -1604,14 +1584,14 @@ impl<'a> GitEngine<'a> {
 
                 let tag_file = tags_dir.join(name);
                 if let Some(parent) = tag_file.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create refs/tags: {e}"))?;
+                    vfs::create_dir_all(parent).map_err(|e| format!("Failed to create refs/tags: {e}"))?;
                 }
 
                 let tag_hash = if let Some(msg) = message {
                     // Create annotated tag object
-                    let now = Utc::now().timestamp();
+                    let now_ts = current_timestamp();
                     let tag_content = format!(
-                        "object {target_hash}\ntype commit\ntag {name}\ntagger {} <{}> {now} +0000\n\n{}\n",
+                        "object {target_hash}\ntype commit\ntag {name}\ntagger {} <{}> {now_ts} +0000\n\n{}\n",
                         self.config.author_name, self.config.author_email, msg
                     );
                     hash_and_write_object(&self.git_dir(), "tag", tag_content.as_bytes())?
@@ -1619,7 +1599,7 @@ impl<'a> GitEngine<'a> {
                     target_hash.clone()
                 };
 
-                fs::write(&tag_file, format!("{tag_hash}\n"))
+                vfs::write(&tag_file, format!("{tag_hash}\n"))
                     .map_err(|e| format!("Failed to write tag ref: {e}"))?;
 
                 let summary = format!("Created tag '{name}' at {target}");
@@ -1638,8 +1618,8 @@ impl<'a> GitEngine<'a> {
                 let name = raw_name.trim().trim_start_matches("refs/tags/").trim_start_matches("tags/");
                 let tag_file = tags_dir.join(name);
                 let mut deleted = false;
-                if tag_file.exists() {
-                    fs::remove_file(&tag_file).map_err(|e| format!("Failed to delete tag ref: {e}"))?;
+                if vfs::exists(&tag_file) {
+                    vfs::remove_file(&tag_file).map_err(|e| format!("Failed to delete tag ref: {e}"))?;
                     deleted = true;
                 }
                 let packed_deleted = self.remove_packed_ref(&format!("refs/tags/{name}"))?;
@@ -1682,13 +1662,13 @@ impl<'a> GitEngine<'a> {
                 let current_branch = current_opt.unwrap_or_default();
 
                 let mut branch_names = Vec::new();
-                if heads_dir.exists() {
+                if vfs::exists(&heads_dir) {
                     collect_refs_recursively(&heads_dir, &heads_dir, &mut branch_names);
                 }
 
                 // Also check packed-refs
                 let packed_refs = self.git_dir().join("packed-refs");
-                if let Ok(content) = fs::read_to_string(&packed_refs) {
+                if let Ok(content) = vfs::read_to_string(&packed_refs) {
                     for line in content.lines() {
                         let line = line.trim();
                         if let Some(rname) = line.split_whitespace().nth(1) {
@@ -1723,14 +1703,14 @@ impl<'a> GitEngine<'a> {
                 };
 
                 let target_file = heads_dir.join(name);
-                if target_file.exists() && !force {
+                if vfs::exists(&target_file) && !force {
                     return Err(format!("Branch '{name}' already exists. Use force: true to overwrite."));
                 }
 
                 if let Some(parent) = target_file.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create branch directory: {e}"))?;
+                    vfs::create_dir_all(parent).map_err(|e| format!("Failed to create branch directory: {e}"))?;
                 }
-                fs::write(&target_file, format!("{hash}\n"))
+                vfs::write(&target_file, format!("{hash}\n"))
                     .map_err(|e| format!("Failed to write branch ref: {e}"))?;
 
                 let summary = format!("Created branch '{name}' at {target}");
@@ -1752,8 +1732,8 @@ impl<'a> GitEngine<'a> {
 
                 let branch_file = heads_dir.join(name);
                 let mut deleted = false;
-                if branch_file.exists() {
-                    fs::remove_file(&branch_file).map_err(|e| format!("Failed to delete branch ref: {e}"))?;
+                if vfs::exists(&branch_file) {
+                    vfs::remove_file(&branch_file).map_err(|e| format!("Failed to delete branch ref: {e}"))?;
                     deleted = true;
                 }
                 let packed_deleted = self.remove_packed_ref(&format!("refs/heads/{name}"))?;
@@ -1773,19 +1753,19 @@ impl<'a> GitEngine<'a> {
                 let old_hash = self.rev_parse_hash(old).map_err(|_| format!("Branch '{old}' not found."))?;
                 
                 let new_file = heads_dir.join(new);
-                if new_file.exists() && !force {
+                if vfs::exists(&new_file) && !force {
                     return Err(format!("Branch '{new}' already exists."));
                 }
                 
                 if let Some(parent) = new_file.parent() {
-                    fs::create_dir_all(parent).map_err(|e| format!("Failed to create new branch directory: {e}"))?;
+                    vfs::create_dir_all(parent).map_err(|e| format!("Failed to create new branch directory: {e}"))?;
                 }
                 
-                fs::write(&new_file, format!("{old_hash}\n")).map_err(|e| format!("Failed to write new branch: {e}"))?;
+                vfs::write(&new_file, format!("{old_hash}\n")).map_err(|e| format!("Failed to write new branch: {e}"))?;
                 
                 let old_file = heads_dir.join(old);
-                if old_file.exists() {
-                    let _ = fs::remove_file(&old_file);
+                if vfs::exists(&old_file) {
+                    let _ = vfs::remove_file(&old_file);
                 }
                 let _ = self.remove_packed_ref(&format!("refs/heads/{old}"));
 
@@ -1793,7 +1773,7 @@ impl<'a> GitEngine<'a> {
                 let (current_opt, _) = self.get_head().unwrap_or((None, None));
                 if current_opt.as_deref() == Some(old) {
                     let head_file = self.git_dir().join("HEAD");
-                    let _ = fs::write(&head_file, format!("ref: refs/heads/{new}\n"));
+                    let _ = vfs::write(&head_file, format!("ref: refs/heads/{new}\n"));
                 }
 
                 let summary = format!("Renamed branch '{old}' to '{new}'");
@@ -1820,13 +1800,13 @@ impl<'a> GitEngine<'a> {
         }
 
         let branch_file = self.git_dir().join("refs").join("heads").join(clean_branch);
-        if !branch_file.exists() && !create_new && self.find_packed_ref(&format!("refs/heads/{clean_branch}")).is_none() {
+        if !vfs::exists(&branch_file) && !create_new && self.find_packed_ref(&format!("refs/heads/{clean_branch}")).is_none() {
             return Err(format!("Branch '{clean_branch}' does not exist"));
         }
 
         // Update HEAD
         let head_file = self.git_dir().join("HEAD");
-        fs::write(&head_file, format!("ref: refs/heads/{clean_branch}\n"))
+        vfs::write(&head_file, format!("ref: refs/heads/{clean_branch}\n"))
             .map_err(|e| format!("Failed to update HEAD: {e}"))?;
 
         // If target branch has a commit, checkout its tree to index and worktree
@@ -1839,8 +1819,8 @@ impl<'a> GitEngine<'a> {
             for old_path in old_files.keys() {
                 if !target_files.contains_key(old_path) {
                     let full_path = self.repo_path.join(old_path);
-                    if full_path.exists() {
-                        let _ = fs::remove_file(full_path);
+                    if vfs::exists(&full_path) {
+                        let _ = vfs::remove_file(&full_path);
                     }
                 }
             }
@@ -1849,9 +1829,9 @@ impl<'a> GitEngine<'a> {
                 let (_, content) = read_loose_object(&self.git_dir(), sha)?;
                 let full_path = self.repo_path.join(rel_path);
                 if let Some(p) = full_path.parent() {
-                    let _ = fs::create_dir_all(p);
+                    let _ = vfs::create_dir_all(p);
                 }
-                fs::write(&full_path, content).map_err(|e| format!("Failed to checkout file '{rel_path}': {e}"))?;
+                vfs::write(&full_path, content).map_err(|e| format!("Failed to checkout file '{rel_path}': {e}"))?;
             }
         }
 
@@ -1896,8 +1876,8 @@ impl<'a> GitEngine<'a> {
             for old_path in head_files.keys() {
                 if !source_files.contains_key(old_path) {
                     let full_path = self.repo_path.join(old_path);
-                    if full_path.is_file() {
-                        let _ = fs::remove_file(full_path);
+                    if vfs::is_file(&full_path) {
+                        let _ = vfs::remove_file(&full_path);
                     }
                 }
             }
@@ -1907,9 +1887,9 @@ impl<'a> GitEngine<'a> {
                 let (_, content) = read_loose_object(&self.git_dir(), sha)?;
                 let full_path = self.repo_path.join(rel_path);
                 if let Some(p) = full_path.parent() {
-                    let _ = fs::create_dir_all(p);
+                    let _ = vfs::create_dir_all(p);
                 }
-                fs::write(&full_path, content).map_err(|e| format!("Failed to write '{rel_path}': {e}"))?;
+                vfs::write(&full_path, content).map_err(|e| format!("Failed to write '{rel_path}': {e}"))?;
             }
 
             self.write_index(&source_files)?;
@@ -2009,20 +1989,20 @@ impl<'a> GitEngine<'a> {
         for old_path in head_files.keys() {
             if !merged_files.contains_key(old_path) {
                 let full_path = self.repo_path.join(old_path);
-                if full_path.exists() {
-                    let _ = fs::remove_file(full_path);
+                if vfs::exists(&full_path) {
+                    let _ = vfs::remove_file(&full_path);
                 }
             }
         }
 
-        // Write merged files to disk
+        // Write merged files to VFS
         for (rel_path, (_, sha)) in &merged_files {
             let (_, content) = read_loose_object(&self.git_dir(), sha)?;
             let full_path = self.repo_path.join(rel_path);
             if let Some(p) = full_path.parent() {
-                let _ = fs::create_dir_all(p);
+                let _ = vfs::create_dir_all(p);
             }
-            fs::write(&full_path, content).map_err(|e| format!("Failed to write merged file '{rel_path}': {e}"))?;
+            vfs::write(&full_path, content).map_err(|e| format!("Failed to write merged file '{rel_path}': {e}"))?;
         }
 
         self.write_index(&merged_files)?;
@@ -2032,7 +2012,7 @@ impl<'a> GitEngine<'a> {
         let mut merge_commit_hash = None;
 
         if !squash {
-            let now = Utc::now().timestamp();
+            let now_ts = current_timestamp();
             let parents = vec![head_hash, source_hash];
             let commit_id = write_commit_object(
                 &self.git_dir(),
@@ -2041,7 +2021,7 @@ impl<'a> GitEngine<'a> {
                 &self.config.author_name,
                 &self.config.author_email,
                 &merge_msg,
-                now,
+                now_ts,
             )?;
             self.update_head_ref(&commit_id)?;
             merge_commit_hash = Some(commit_id);
@@ -2070,8 +2050,8 @@ impl<'a> GitEngine<'a> {
 
     fn read_stashes(&self) -> Vec<StashEntry> {
         let path = self.stash_log_file();
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
+        if vfs::exists(&path) {
+            if let Ok(content) = vfs::read_to_string(&path) {
                 if let Ok(list) = serde_json::from_str::<Vec<StashEntry>>(&content) {
                     return list;
                 }
@@ -2084,7 +2064,7 @@ impl<'a> GitEngine<'a> {
         let path = self.stash_log_file();
         let content = serde_json::to_string_pretty(list)
             .map_err(|e| format!("Failed to serialize stash log: {e}"))?;
-        fs::write(&path, content).map_err(|e| format!("Failed to write stash log: {e}"))?;
+        vfs::write(&path, content).map_err(|e| format!("Failed to write stash log: {e}"))?;
         Ok(())
     }
 
@@ -2110,7 +2090,7 @@ impl<'a> GitEngine<'a> {
                             "name": format!("stash@{{{}}}", s.index),
                             "branch": s.branch,
                             "message": s.message,
-                            "date": DateTime::from_timestamp(s.timestamp, 0).map(|d: DateTime<Utc>| d.to_rfc3339()).unwrap_or_default()
+                            "date": format_timestamp(s.timestamp)
                         })).collect::<Vec<_>>()
                     }),
                     summary,
@@ -2124,7 +2104,7 @@ impl<'a> GitEngine<'a> {
                 // Save dirty worktree as tree object
                 let mut current_map = BTreeMap::new();
                 for (rel_path, abs_path) in &worktree_files {
-                    if let Ok(bytes) = fs::read(abs_path) {
+                    if let Ok(bytes) = vfs::read(abs_path) {
                         if let Ok(sha) = write_blob(&self.git_dir(), &bytes) {
                             current_map.insert(rel_path.clone(), (REGULAR_FILE_MODE, sha));
                         }
@@ -2132,7 +2112,7 @@ impl<'a> GitEngine<'a> {
                 }
 
                 let tree_hex = build_tree_hierarchy(&self.git_dir(), &current_map)?;
-                let now = Utc::now().timestamp();
+                let now_ts = current_timestamp();
                 let parent = head_opt.unwrap_or_default();
                 let commit_hex = write_commit_object(
                     &self.git_dir(),
@@ -2141,7 +2121,7 @@ impl<'a> GitEngine<'a> {
                     &self.config.author_name,
                     &self.config.author_email,
                     msg,
-                    now,
+                    now_ts,
                 )?;
 
                 // Re-index stashes
@@ -2151,7 +2131,7 @@ impl<'a> GitEngine<'a> {
                     tree_hash: tree_hex,
                     branch: branch.clone(),
                     message: msg.to_string(),
-                    timestamp: now,
+                    timestamp: now_ts,
                 }];
 
                 for mut old_s in stashes {
@@ -2168,21 +2148,21 @@ impl<'a> GitEngine<'a> {
                 for (rel_path, abs_path) in &worktree_files {
                     if let Some((_, head_sha)) = head_files.get(rel_path) {
                         let (_, bdata) = read_loose_object(&self.git_dir(), head_sha)?;
-                        fs::write(abs_path, bdata).map_err(|e| e.to_string())?;
+                        vfs::write(abs_path, bdata).map_err(|e| e.to_string())?;
                     } else if include_untracked {
-                        let _ = fs::remove_file(abs_path);
+                        let _ = vfs::remove_file(abs_path);
                     }
                 }
 
                 // Restore any head files that were deleted in worktree
                 for (rel_path, (_, head_sha)) in &head_files {
                     let full_path = self.repo_path.join(rel_path);
-                    if !full_path.exists() {
+                    if !vfs::exists(&full_path) {
                         let (_, bdata) = read_loose_object(&self.git_dir(), head_sha)?;
                         if let Some(p) = full_path.parent() {
-                            let _ = fs::create_dir_all(p);
+                            let _ = vfs::create_dir_all(p);
                         }
-                        let _ = fs::write(&full_path, bdata);
+                        let _ = vfs::write(&full_path, bdata);
                     }
                 }
 
@@ -2211,9 +2191,9 @@ impl<'a> GitEngine<'a> {
                     let (_, bdata) = read_loose_object(&self.git_dir(), sha)?;
                     let full = self.repo_path.join(rel_path);
                     if let Some(p) = full.parent() {
-                        let _ = fs::create_dir_all(p);
+                        let _ = vfs::create_dir_all(p);
                     }
-                    fs::write(&full, bdata).map_err(|e| e.to_string())?;
+                    vfs::write(&full, bdata).map_err(|e| e.to_string())?;
                 }
 
                 if action == "pop" {
@@ -2248,12 +2228,11 @@ impl<'a> GitEngine<'a> {
 }
 
 fn collect_refs_recursively(base_dir: &std::path::Path, current_dir: &std::path::Path, refs: &mut Vec<String>) {
-    if let Ok(entries) = fs::read_dir(current_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
+    if let Ok(entries) = vfs::read_dir(current_dir) {
+        for path in entries {
+            if vfs::is_dir(&path) {
                 collect_refs_recursively(base_dir, &path, refs);
-            } else if path.is_file() {
+            } else if vfs::is_file(&path) {
                 if let Ok(rel) = path.strip_prefix(base_dir) {
                     refs.push(rel.to_string_lossy().replace('\\', "/"));
                 }
@@ -2261,4 +2240,3 @@ fn collect_refs_recursively(base_dir: &std::path::Path, current_dir: &std::path:
         }
     }
 }
-

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use flate2::read::ZlibDecoder;
@@ -7,6 +6,8 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use sha1::{Digest, Sha1};
 use std::io::Read;
+
+use crate::engine::vfs;
 
 /// Loose object writing and formatting
 pub fn hash_and_write_object(git_dir: &Path, obj_type: &str, data: &[u8]) -> Result<String, String> {
@@ -21,10 +22,10 @@ pub fn hash_and_write_object(git_dir: &Path, obj_type: &str, data: &[u8]) -> Res
     let suffix = &hash_hex[2..];
 
     let obj_dir = git_dir.join("objects").join(prefix);
-    fs::create_dir_all(&obj_dir).map_err(|e| format!("Failed to create object dir: {e}"))?;
+    vfs::create_dir_all(&obj_dir).map_err(|e| format!("Failed to create object dir: {e}"))?;
 
     let obj_path = obj_dir.join(suffix);
-    if !obj_path.exists() {
+    if !vfs::exists(&obj_path) {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder
             .write_all(header.as_bytes())
@@ -36,7 +37,7 @@ pub fn hash_and_write_object(git_dir: &Path, obj_type: &str, data: &[u8]) -> Res
             .finish()
             .map_err(|e| format!("Zlib finish error: {e}"))?;
 
-        fs::write(&obj_path, compressed).map_err(|e| format!("Failed to write loose object: {e}"))?;
+        vfs::write(&obj_path, compressed).map_err(|e| format!("Failed to write loose object: {e}"))?;
     }
 
     Ok(hash_hex)
@@ -51,11 +52,11 @@ pub fn read_loose_object(git_dir: &Path, hex: &str) -> Result<(String, Vec<u8>),
     let suffix = &hex[2..];
     let obj_path = git_dir.join("objects").join(prefix).join(suffix);
 
-    if !obj_path.exists() {
+    if !vfs::exists(&obj_path) {
         return Err(format!("Loose object '{hex}' not found"));
     }
 
-    let compressed = fs::read(&obj_path).map_err(|e| format!("Failed to read loose object file: {e}"))?;
+    let compressed = vfs::read(&obj_path).map_err(|e| format!("Failed to read loose object file: {e}"))?;
     let mut decoder = ZlibDecoder::new(&compressed[..]);
     let mut decompressed = Vec::new();
     decoder
@@ -497,7 +498,8 @@ fn lcs_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<DiffOp<'a>> {
             if old[i] == new[j] {
                 dp[i + 1][j + 1] = dp[i][j] + 1;
             } else {
-                dp[i + 1][j + 1] = dp[i + 1][j].max(dp[i][j + 1]);
+                dp[i + 1][j + 1] = dp[i][j] + 1;
+                dp[i + 1][j + 1] = dp[i][j].max(dp[i][j + 1]);
             }
         }
     }
@@ -535,8 +537,8 @@ impl IgnoreMatcher {
     pub fn from_repo_root(work_dir: &Path) -> Self {
         let mut patterns = vec![".git".to_string()];
         let gitignore_path = work_dir.join(".gitignore");
-        if gitignore_path.is_file() {
-            if let Ok(content) = fs::read_to_string(&gitignore_path) {
+        if vfs::is_file(&gitignore_path) {
+            if let Ok(content) = vfs::read_to_string(&gitignore_path) {
                 for line in content.lines() {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() && !trimmed.starts_with('#') {
@@ -603,10 +605,9 @@ pub fn scan_worktree_files(work_dir: &Path) -> BTreeMap<String, PathBuf> {
     let mut stack = vec![work_dir.to_path_buf()];
 
     while let Some(current_dir) = stack.pop() {
-        if let Ok(entries) = fs::read_dir(&current_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let file_name = entry.file_name().to_string_lossy().to_string();
+        if let Ok(entries) = vfs::read_dir(&current_dir) {
+            for path in entries {
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
                 if file_name == ".git" {
                     continue;
@@ -617,14 +618,14 @@ pub fn scan_worktree_files(work_dir: &Path) -> BTreeMap<String, PathBuf> {
                     Err(_) => continue,
                 };
 
-                let is_dir = path.is_dir();
+                let is_dir = vfs::is_dir(&path);
                 if matcher.is_ignored(&rel_path, is_dir) {
                     continue;
                 }
 
                 if is_dir {
                     stack.push(path);
-                } else if path.is_file() {
+                } else if vfs::is_file(&path) {
                     files.insert(rel_path, path);
                 }
             }

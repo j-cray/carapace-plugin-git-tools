@@ -6,8 +6,9 @@ A WebAssembly (WASM) tool plugin for [Carapace](https://github.com/puremachinery
 
 - **Granular Dedicated Tools**: 22 dedicated tools with strict JSON Schema draft-07 definitions.
 - **Rich Structured Output**: Structured JSON data coupled with human-readable diffs and status summaries.
-- **Pure-Rust Git Engine**: Built with Gitoxide (`gix`) for memory safety and zero external C dependencies.
-- **Remote Synchronization**: Clone, fetch, pull, and push support over HTTP/HTTPS leveraging Carapace host capabilities and credential storage.
+- **Pure-Rust In-Memory Git Engine**: Built on a sandboxed Virtual File System (VFS) with loose object storage, tree hashing, and index management without ambient OS filesystem dependencies.
+- **Zero WASI Linker Dependencies**: Targets `wasm32-unknown-unknown` with zero `wasi:*` imports, perfectly matching Carapace's sandboxed host runtime.
+- **Remote Synchronization**: Clone, fetch, pull, and push support over HTTP/HTTPS leveraging Carapace host capabilities (`http-fetch`) and credential storage.
 - **Enterprise Safety Policies**:
   - **Path Containment**: Restricts repository operations to explicitly configured root paths.
   - **Protected Branch Defense**: Safeguards critical branches (`main`, `master`, `release`, etc.) from accidental deletion or unforced modifications.
@@ -55,7 +56,7 @@ Configure the plugin in your Carapace configuration file (e.g. `carapace.json` o
     enabled: true,
     load: {
       paths: [
-        "/path/to/carapace-plugin-git-tools/target/wasm32-wasip1/release",
+        "/path/to/carapace-plugin-git-tools/target/wasm32-unknown-unknown/release",
       ],
     },
     "git-tools": {
@@ -93,10 +94,15 @@ This repository includes a Nix Flake development shell providing all required to
 
 ### Build the WASM Component
 ```bash
-cargo component build --release --target wasm32-wasip1
+./build.sh
+```
+or:
+```bash
+cargo component build --release --target wasm32-unknown-unknown
+cp target/wasm32-unknown-unknown/release/git_tools.wasm target/wasm32-unknown-unknown/release/git-tools.wasm
 ```
 The compiled component will be located at:
-`target/wasm32-wasip1/release/carapace_plugin_git_tools.wasm`
+`target/wasm32-unknown-unknown/release/git-tools.wasm`
 
 ### Run Automated Tests
 ```bash
@@ -105,7 +111,7 @@ cargo test
 
 ### Inspect Component WIT Interface
 ```bash
-wasm-tools component wit target/wasm32-wasip1/release/carapace_plugin_git_tools.wasm
+wasm-tools component wit target/wasm32-unknown-unknown/release/git-tools.wasm
 ```
 
 ## License

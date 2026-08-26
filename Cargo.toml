@@ -1,11 +1,12 @@
 [package]
-name = "carapace-plugin-git-tools"
+name = "git-tools"
 version = "0.1.0"
 edition = "2021"
 description = "Comprehensive Git tool suite for Carapace agents"
 license = "MIT OR Apache-2.0"
 
 [lib]
+name = "git_tools"
 crate-type = ["cdylib", "rlib"]
 
 [package.metadata.component]
@@ -15,10 +16,9 @@ target = { path = "wit/plugin.wit", world = "tool-plugin" }
 [dependencies]
 wit-bindgen = { version = "0.36.0", default-features = false, features = ["realloc"] }
 wit-bindgen-rt = "0.36.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-gix = { version = "0.87", default-features = false, features = ["sha1", "revision", "index", "status", "dirwalk", "blob-diff", "merge", "blame", "attributes", "excludes", "serde"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
 sha1 = "0.10"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
