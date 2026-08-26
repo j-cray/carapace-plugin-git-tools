@@ -60,6 +60,10 @@ Configure the plugin in your Carapace configuration file (e.g. `carapace.json` o
       ],
     },
     "git-tools": {
+      // GitHub Personal Access Token for private repository HTTPS authentication
+      // Supports environment variable expansion (${GITHUB_PAT})
+      github_token: "${GITHUB_PAT}",
+
       // Author metadata for AI commits
       author_name: "Carapace AI",
       author_email: "carapace-ai@example.com",
@@ -85,6 +89,13 @@ Configure the plugin in your Carapace configuration file (e.g. `carapace.json` o
   }
 }
 ```
+
+### Authentication & Private Repositories
+The plugin securely authenticates against GitHub and Git over HTTPS using standard HTTP Basic Authentication with `x-access-token:<token>`:
+1. **`carapace.json5` Configuration**: Set `plugins.git-tools.github_token: "${GITHUB_PAT}"` (or `token`, `github_pat`).
+2. **Carapace Credential Store**: Alternatively, stored credentials under `git-tools:github_token` are automatically resolved via `host::credential-get`.
+3. **URL Security**: Repository URLs containing inline credentials (e.g. `https://token@github.com/...`) are strictly rejected to prevent secret leakage into logs or `.git/config`.
+
 
 ---
 

@@ -21,6 +21,7 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc", "serde"] }
 sha1 = "0.10"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3.14"

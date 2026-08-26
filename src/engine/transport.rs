@@ -1,11 +1,56 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use base64::Engine;
 use serde_json::json;
 
 use crate::bindings::carapace::plugin::host::{self, HttpRequest};
 use crate::config::PluginConfig;
 use crate::engine::vfs;
 use crate::types::GitToolResult;
+
+/// Validate that a repository URL is supported and does NOT contain embedded credentials.
+pub fn validate_repo_url(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("Repository URL cannot be empty".to_string());
+    }
+
+    if !trimmed.starts_with("https://") && !trimmed.starts_with("http://") {
+        return Err(format!(
+            "Unsupported repository URL scheme for '{trimmed}'. Only HTTP/HTTPS URLs are supported."
+        ));
+    }
+
+    validate_no_embedded_credentials(trimmed)?;
+    Ok(())
+}
+
+/// Validate that a URL does not contain inline credentials (e.g. https://token@github.com/... or https://user:pass@host/...)
+pub fn validate_no_embedded_credentials(url: &str) -> Result<(), String> {
+    if let Some(pos) = url.find("://") {
+        let rest = &url[pos + 3..];
+        let host_part = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        if host_part.contains('@') {
+            return Err(
+                "Embedded credentials in repository URLs are rejected for security. Please configure 'plugins.git-tools.github_token' in carapace.json5 instead."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn host_credential_get(key: &str) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        host::credential_get(key)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = key;
+        None
+    }
+}
 
 pub struct RemoteTransport<'a> {
     pub repo_path: PathBuf,
@@ -15,6 +60,42 @@ pub struct RemoteTransport<'a> {
 impl<'a> RemoteTransport<'a> {
     pub fn new(repo_path: PathBuf, config: &'a PluginConfig) -> Self {
         Self { repo_path, config }
+    }
+
+    /// Build the Authorization header from configured GitHub / Git token.
+    /// Uses standard HTTP Basic Authentication with `x-access-token:<token>` base64-encoded,
+    /// or preserves existing Basic / Bearer / token prefix if provided.
+    pub fn auth_header(&self) -> Option<(String, String)> {
+        if let Some(ref t) = self.config.github_token {
+            let trimmed = t.trim();
+            if !trimmed.is_empty() {
+                return Some(Self::format_auth_header(trimmed));
+            }
+        }
+
+        let token_keys = ["github_token", "token", "github_pat", "git_token"];
+        for key in &token_keys {
+            if let Some(t) = host_credential_get(key) {
+                let trimmed = t.trim();
+                if !trimmed.is_empty() {
+                    return Some(Self::format_auth_header(trimmed));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Format an auth header value from a token string
+    pub fn format_auth_header(token: &str) -> (String, String) {
+        let trimmed = token.trim();
+        if trimmed.starts_with("Basic ") || trimmed.starts_with("Bearer ") || trimmed.starts_with("token ") {
+            ("Authorization".to_string(), trimmed.to_string())
+        } else {
+            let auth_payload = format!("x-access-token:{trimmed}");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(auth_payload);
+            ("Authorization".to_string(), format!("Basic {encoded}"))
+        }
     }
 
     fn git_dir(&self) -> PathBuf {
@@ -58,6 +139,7 @@ impl<'a> RemoteTransport<'a> {
             "add" => {
                 let name = remote_name.ok_or_else(|| "remote_name is required to add remote".to_string())?;
                 let target_url = url.ok_or_else(|| "url is required to add remote".to_string())?;
+                validate_repo_url(target_url)?;
 
                 // Remove previous definition if it exists
                 let mut filtered_lines = Vec::new();
@@ -167,6 +249,8 @@ impl<'a> RemoteTransport<'a> {
         branch: Option<&str>,
         depth: Option<usize>,
     ) -> Result<GitToolResult, String> {
+        validate_repo_url(url)?;
+
         let dest = self.repo_path.clone();
 
         vfs::create_dir_all(&dest).map_err(|e| format!("Failed to create clone destination directory: {e}"))?;
@@ -197,8 +281,8 @@ impl<'a> RemoteTransport<'a> {
         let info_refs_url = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
         let mut headers = vec![("User-Agent".to_string(), "git/2.40 (Carapace)".to_string())];
 
-        if let Some(token) = host::credential_get("github_token").or_else(|| host::credential_get("git_token")) {
-            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+        if let Some((header_name, header_val)) = self.auth_header() {
+            headers.push((header_name, header_val));
         }
 
         let http_req = HttpRequest {
@@ -270,10 +354,11 @@ impl<'a> RemoteTransport<'a> {
         let mut updated_refs = BTreeMap::new();
 
         let handshake_status = if let Some(ref url) = remote_url {
+            validate_repo_url(url)?;
             let info_refs_url = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
             let mut headers = vec![("User-Agent".to_string(), "git/2.40 (Carapace)".to_string())];
-            if let Some(token) = host::credential_get("github_token").or_else(|| host::credential_get("git_token")) {
-                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            if let Some((header_name, header_val)) = self.auth_header() {
+                headers.push((header_name, header_val));
             }
             let http_req = HttpRequest {
                 method: "GET".to_string(),
@@ -398,10 +483,11 @@ impl<'a> RemoteTransport<'a> {
         let remote_url = remote_info.ok().and_then(|res| res.data["url"].as_str().map(String::from));
 
         let push_status = if let Some(ref url) = remote_url {
+            validate_repo_url(url)?;
             let info_refs_url = format!("{}/info/refs?service=git-receive-pack", url.trim_end_matches('/'));
             let mut headers = vec![("User-Agent".to_string(), "git/2.40 (Carapace)".to_string())];
-            if let Some(token) = host::credential_get("github_token").or_else(|| host::credential_get("git_token")) {
-                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            if let Some((header_name, header_val)) = self.auth_header() {
+                headers.push((header_name, header_val));
             }
             let http_req = HttpRequest {
                 method: "GET".to_string(),

@@ -3,7 +3,9 @@ use tempfile::TempDir;
 
 use git_tools::bindings::exports::tool::ToolContext;
 use git_tools::config::PluginConfig;
-use git_tools::engine::transport::{parse_smart_http_refs, RemoteTransport};
+use git_tools::engine::transport::{
+    parse_smart_http_refs, validate_no_embedded_credentials, validate_repo_url, RemoteTransport,
+};
 use git_tools::engine::vfs;
 use git_tools::engine::GitEngine;
 use git_tools::safety::{normalize_path, SafetyChecker};
@@ -855,4 +857,148 @@ fn test_reset_invalid_mode() {
 
     let invalid_reset = engine.reset(None, Some("unsupported_mode"), None);
     assert!(invalid_reset.is_err());
+}
+
+#[test]
+fn test_url_validation_and_embedded_credential_rejection() {
+    // Valid HTTPS and HTTP URLs
+    assert!(validate_repo_url("https://github.com/puremachinery/carapace.git").is_ok());
+    assert!(validate_repo_url("https://github.com/owner/private-repo.git").is_ok());
+    assert!(validate_repo_url("http://localhost:8080/git/test.git").is_ok());
+
+    // Empty URL
+    assert!(validate_repo_url("").is_err());
+    assert!(validate_repo_url("   ").is_err());
+
+    // Non-HTTP/HTTPS schemes
+    assert!(validate_repo_url("ssh://git@github.com/puremachinery/carapace.git").is_err());
+    assert!(validate_repo_url("git@github.com:puremachinery/carapace.git").is_err());
+    assert!(validate_repo_url("file:///path/to/repo").is_err());
+
+    // Reject URLs with embedded credentials (PATs, user:pass, user@host)
+    let err_pat = validate_repo_url("https://ghp_1234567890abcdef@github.com/owner/private-repo.git");
+    assert!(err_pat.is_err());
+    assert!(err_pat.unwrap_err().contains("Embedded credentials in repository URLs are rejected"));
+
+    let err_userpass = validate_repo_url("https://user:password@github.com/owner/private-repo.git");
+    assert!(err_userpass.is_err());
+    assert!(err_userpass.unwrap_err().contains("Embedded credentials in repository URLs are rejected"));
+
+    let err_finegrained = validate_repo_url("https://github_pat_11ABCD_XYZ@github.com/owner/private-repo.git");
+    assert!(err_finegrained.is_err());
+    assert!(err_finegrained.unwrap_err().contains("Embedded credentials in repository URLs are rejected"));
+
+    // Direct check of validate_no_embedded_credentials helper
+    assert!(validate_no_embedded_credentials("https://github.com/test/repo").is_ok());
+    assert!(validate_no_embedded_credentials("https://token@github.com/test/repo").is_err());
+}
+
+#[test]
+fn test_auth_header_formatting_and_github_pat() {
+    // Standard classic GitHub PAT (ghp_...)
+    let (h_name, h_val) = RemoteTransport::format_auth_header("ghp_ABC123xyz456");
+    assert_eq!(h_name, "Authorization");
+    // "x-access-token:ghp_ABC123xyz456" base64 encoded -> "eC1hY2Nlc3MtdG9rZW46Z2hwX0FCQzEyM3h5ejQ1Ng=="
+    assert_eq!(h_val, "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX0FCQzEyM3h5ejQ1Ng==");
+
+    // Fine-grained GitHub PAT (github_pat_...)
+    let (h_name2, h_val2) = RemoteTransport::format_auth_header("github_pat_TOKEN999");
+    assert_eq!(h_name2, "Authorization");
+    assert_eq!(h_val2, "Basic eC1hY2Nlc3MtdG9rZW46Z2l0aHViX3BhdF9UT0tFTjk5OQ==");
+
+    // Explicit Bearer prefix preserved
+    let (h_name3, h_val3) = RemoteTransport::format_auth_header("Bearer custom_token_val");
+    assert_eq!(h_name3, "Authorization");
+    assert_eq!(h_val3, "Bearer custom_token_val");
+
+    // Explicit Basic prefix preserved
+    let (h_name4, h_val4) = RemoteTransport::format_auth_header("Basic dXNlcjpwYXNz");
+    assert_eq!(h_name4, "Authorization");
+    assert_eq!(h_val4, "Basic dXNlcjpwYXNz");
+
+    // Explicit token prefix preserved
+    let (h_name5, h_val5) = RemoteTransport::format_auth_header("token ghp_legacy");
+    assert_eq!(h_name5, "Authorization");
+    assert_eq!(h_val5, "token ghp_legacy");
+}
+
+#[test]
+fn test_git_remote_and_clone_embedded_credential_rejection() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        github_token: Some("ghp_secure_configured_pat".to_string()),
+        ..Default::default()
+    };
+    let ctx = ToolContext {
+        agent_id: Some("agent-test".to_string()),
+        session_key: Some("main".to_string()),
+        message_channel: None,
+        sandboxed: false,
+    };
+
+    // Initializing repo
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Adding remote with embedded token should be rejected by git_remote
+    let add_bad_res = tools::dispatch(
+        "git_remote",
+        &format!(
+            r#"{{"repo_path": "{}", "action": "add", "remote_name": "origin", "url": "https://ghp_secret@github.com/test/repo.git"}}"#,
+            repo_path.display()
+        ),
+        &config,
+        &ctx,
+    );
+    assert!(!add_bad_res.success);
+    assert!(add_bad_res.error.unwrap().contains("Embedded credentials in repository URLs are rejected"));
+
+    // Adding remote with clean HTTPS URL should succeed
+    let add_good_res = tools::dispatch(
+        "git_remote",
+        &format!(
+            r#"{{"repo_path": "{}", "action": "add", "remote_name": "origin", "url": "https://github.com/test/repo.git"}}"#,
+            repo_path.display()
+        ),
+        &config,
+        &ctx,
+    );
+    assert!(add_good_res.success);
+
+    // git_clone with embedded token should be rejected
+    let clone_bad_res = tools::dispatch(
+        "git_clone",
+        &format!(
+            r#"{{"url": "https://token123@github.com/test/private.git", "target_path": "{}/cloned"}}"#,
+            repo_path.display()
+        ),
+        &config,
+        &ctx,
+    );
+    assert!(!clone_bad_res.success);
+    assert!(clone_bad_res.error.unwrap().contains("Embedded credentials in repository URLs are rejected"));
+}
+
+#[test]
+fn test_remote_transport_auth_header_integration() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+
+    // Config without token -> auth_header is None
+    let config_none = PluginConfig::default();
+    let transport_none = RemoteTransport::new(repo_path.clone(), &config_none);
+    assert!(transport_none.auth_header().is_none());
+
+    // Config with token -> auth_header is Basic x-access-token
+    let config_pat = PluginConfig {
+        github_token: Some("ghp_test_token_xyz".to_string()),
+        ..Default::default()
+    };
+    let transport_pat = RemoteTransport::new(repo_path.clone(), &config_pat);
+    let header = transport_pat.auth_header();
+    assert!(header.is_some());
+    let (h_name, h_val) = header.unwrap();
+    assert_eq!(h_name, "Authorization");
+    assert!(h_val.starts_with("Basic "));
 }

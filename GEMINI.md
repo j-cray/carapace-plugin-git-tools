@@ -39,6 +39,7 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
    - `git_push`: Push local commits/tags to remote repositories.
 
 ### Configuration (`plugins.git-tools.*`)
+- `github_token`: GitHub Personal Access Token (PAT) for HTTPS clone/fetch/push of private repositories (supports `${GITHUB_PAT}`, aliases `token`, `github_pat`, and credential store fallback).
 - `author_name`: Author name for commits (default: `"Carapace Agent"`).
 - `author_email`: Author email for commits (default: `"carapace-agent@local"`).
 - `allowed_roots`: Comma-separated or JSON list of directory path prefixes allowed for repository access.
@@ -47,6 +48,7 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
 - `log_max_count`: Default maximum commits returned by `git_log` (default: `50`).
 
 ### Security & Safety Model
+- **Credential Protection**: Uses standard HTTP Basic Authentication with `x-access-token:<PAT>` for Git HTTPS operations. Rejects embedded credentials in URLs (`https://token@...`) to prevent secret leakage in repository configs and tool outputs.
 - **Path Containment**: Prevents path traversal and restricts repository operations to configured `allowed_roots`.
 - **Protected Branch Defense**: Guards `main`/`master` against accidental deletion or force updates.
 - **Sandboxed Agent Restrictions**: Disables destructive operations (`git_clean`, `git_reset --hard`, `git_push --force`, protected branch modifications) when invoked in `ctx.sandboxed` mode.
