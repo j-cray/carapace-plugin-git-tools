@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use crate::bindings::exports::carapace::plugin::tool::ToolContext;
 use crate::config::PluginConfig;
 
-
 pub struct SafetyChecker;
 
 impl SafetyChecker {
@@ -17,12 +16,32 @@ impl SafetyChecker {
         };
 
         let path = PathBuf::from(raw_path);
-        
-        // Canonicalize if the path exists, otherwise normalize
-        let resolved = if let Ok(canonical) = path.canonicalize() {
+        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let abs_path = if path.is_relative() {
+            base_dir.join(&path)
+        } else {
+            path
+        };
+
+        // Canonicalize if path exists; if not, canonicalize closest existing ancestor
+        let resolved = if let Ok(canonical) = abs_path.canonicalize() {
             canonical
         } else {
-            normalize_path(&path)
+            // Find closest existing ancestor to resolve any symlinks along the path
+            let mut current = abs_path.as_path();
+            let mut uncreated = Vec::new();
+            while !current.exists() && current.parent().is_some() {
+                if let Some(file_name) = current.file_name() {
+                    uncreated.push(file_name);
+                }
+                current = current.parent().unwrap();
+            }
+
+            let mut resolved_base = current.canonicalize().unwrap_or_else(|_| normalize_path(current));
+            for segment in uncreated.into_iter().rev() {
+                resolved_base.push(segment);
+            }
+            normalize_path(&resolved_base)
         };
 
         // If allowed_roots is specified, enforce that resolved path starts with an allowed root
@@ -30,7 +49,12 @@ impl SafetyChecker {
             let mut is_allowed = false;
             for root_str in &config.allowed_roots {
                 let root_path = PathBuf::from(root_str);
-                let canonical_root = root_path.canonicalize().unwrap_or_else(|_| normalize_path(&root_path));
+                let abs_root = if root_path.is_relative() {
+                    base_dir.join(&root_path)
+                } else {
+                    root_path
+                };
+                let canonical_root = abs_root.canonicalize().unwrap_or_else(|_| normalize_path(&abs_root));
                 if resolved.starts_with(&canonical_root) {
                     is_allowed = true;
                     break;
@@ -55,11 +79,17 @@ impl SafetyChecker {
         config: &PluginConfig,
         ctx: &ToolContext,
     ) -> Result<(), String> {
-        let normalized = branch_name.trim_start_matches("refs/heads/").trim();
+        let normalized = branch_name
+            .trim()
+            .trim_start_matches("refs/heads/")
+            .trim_start_matches("heads/")
+            .trim_start_matches("refs/remotes/origin/")
+            .trim_start_matches("origin/");
+
         let is_protected = config
             .protected_branches
             .iter()
-            .any(|b| b.eq_ignore_ascii_case(normalized));
+            .any(|b| b.trim().eq_ignore_ascii_case(normalized));
 
         if is_protected {
             if ctx.sandboxed {
@@ -100,15 +130,26 @@ pub fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                if let Some(Component::Normal(_)) = components.last() {
-                    components.pop();
-                } else {
-                    components.push(component);
+                match components.last() {
+                    Some(Component::Normal(_)) => {
+                        components.pop();
+                    }
+                    Some(Component::RootDir) => {
+                        // In POSIX root, /.. stays /
+                    }
+                    _ => {
+                        components.push(component);
+                    }
                 }
             }
             _ => components.push(component),
         }
     }
 
-    components.into_iter().collect()
+    if components.is_empty() {
+        PathBuf::from(".")
+    } else {
+        components.into_iter().collect()
+    }
 }
+

@@ -53,7 +53,7 @@ struct StashParams {
     include_untracked: Option<bool>,
 }
 
-pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolContext) -> GitToolResult {
+pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
     if name != "git_stash" {
         return GitToolResult::err(format!("Unknown stash tool: {name}"));
     }
@@ -66,6 +66,13 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
         Ok(p) => p,
         Err(e) => return GitToolResult::err(e),
     };
+
+    if params.action == "drop" {
+        if let Err(e) = SafetyChecker::verify_destructive_allowed("git_stash (action: drop)", ctx) {
+            return GitToolResult::err(e);
+        }
+    }
+
     let engine = GitEngine::new(path, config);
     engine
         .stash(

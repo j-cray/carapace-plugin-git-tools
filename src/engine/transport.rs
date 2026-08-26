@@ -1,7 +1,7 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use serde_json::json;
-
 
 use crate::bindings::carapace::plugin::host::{self, HttpRequest};
 use crate::config::PluginConfig;
@@ -17,6 +17,15 @@ impl<'a> RemoteTransport<'a> {
         Self { repo_path, config }
     }
 
+    fn git_dir(&self) -> PathBuf {
+        let dot_git = self.repo_path.join(".git");
+        if dot_git.is_dir() {
+            dot_git
+        } else {
+            self.repo_path.clone()
+        }
+    }
+
     /// Manage remotes (list, add, remove, get_url)
     pub fn remote(
         &self,
@@ -24,7 +33,7 @@ impl<'a> RemoteTransport<'a> {
         remote_name: Option<&str>,
         url: Option<&str>,
     ) -> Result<GitToolResult, String> {
-        let config_file = self.repo_path.join(".git").join("config");
+        let config_file = self.git_dir().join("config");
         let content = if config_file.exists() {
             fs::read_to_string(&config_file).unwrap_or_default()
         } else {
@@ -38,7 +47,9 @@ impl<'a> RemoteTransport<'a> {
                     let trimmed = line.trim();
                     if trimmed.starts_with("[remote \"") && trimmed.ends_with("\"]") {
                         let name = &trimmed[9..trimmed.len() - 2];
-                        remotes.push(name.to_string());
+                        if !remotes.contains(&name.to_string()) {
+                            remotes.push(name.to_string());
+                        }
                     }
                 }
                 let summary = format!("Found {} remote(s)", remotes.len());
@@ -48,13 +59,32 @@ impl<'a> RemoteTransport<'a> {
                 let name = remote_name.ok_or_else(|| "remote_name is required to add remote".to_string())?;
                 let target_url = url.ok_or_else(|| "url is required to add remote".to_string())?;
 
-                let mut new_config = content.clone();
+                // Remove previous definition if it exists
+                let mut filtered_lines = Vec::new();
+                let mut in_target_remote = false;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed == format!("[remote \"{name}\"]") {
+                        in_target_remote = true;
+                        continue;
+                    } else if trimmed.starts_with('[') {
+                        in_target_remote = false;
+                    }
+                    if !in_target_remote {
+                        filtered_lines.push(line);
+                    }
+                }
+
+                let mut new_config = filtered_lines.join("\n");
+                if !new_config.is_empty() && !new_config.ends_with('\n') {
+                    new_config.push('\n');
+                }
                 new_config.push_str(&format!(
-                    "\n[remote \"{name}\"]\n\turl = {target_url}\n\tfetch = +refs/heads/*:refs/remotes/{name}/*\n"
+                    "[remote \"{name}\"]\n\turl = {target_url}\n\tfetch = +refs/heads/*:refs/remotes/{name}/*\n"
                 ));
 
-                fs::create_dir_all(self.repo_path.join(".git"))
-                    .map_err(|e| format!("Failed to create .git directory: {e}"))?;
+                fs::create_dir_all(self.git_dir())
+                    .map_err(|e| format!("Failed to create git directory: {e}"))?;
                 fs::write(&config_file, new_config)
                     .map_err(|e| format!("Failed to write .git/config: {e}"))?;
 
@@ -106,9 +136,11 @@ impl<'a> RemoteTransport<'a> {
                         in_target_remote = false;
                     }
 
-                    if in_target_remote && trimmed.starts_with("url =") {
-                        found_url = Some(trimmed[5..].trim().to_string());
-                        break;
+                    if in_target_remote && trimmed.starts_with("url") {
+                        if let Some(idx) = trimmed.find('=') {
+                            found_url = Some(trimmed[idx + 1..].trim().to_string());
+                            break;
+                        }
                     }
                 }
 
@@ -143,6 +175,8 @@ impl<'a> RemoteTransport<'a> {
             .map_err(|e| format!("Failed to create refs/heads: {e}"))?;
         fs::create_dir_all(git_dir.join("refs").join("remotes").join("origin"))
             .map_err(|e| format!("Failed to create refs/remotes/origin: {e}"))?;
+        fs::create_dir_all(git_dir.join("refs").join("tags"))
+            .map_err(|e| format!("Failed to create refs/tags: {e}"))?;
         fs::create_dir_all(git_dir.join("objects"))
             .map_err(|e| format!("Failed to create objects directory: {e}"))?;
 
@@ -172,8 +206,29 @@ impl<'a> RemoteTransport<'a> {
             body: None,
         };
 
+        let mut discovered_refs = BTreeMap::new();
         let handshake_status = match host::http_fetch(&http_req) {
-            Ok(resp) => format!("HTTP {}", resp.status),
+            Ok(resp) => {
+                if let Some(ref body_bytes) = resp.body {
+                    discovered_refs = parse_smart_http_refs(body_bytes);
+                    // Write remote tracking refs
+                    for (ref_name, sha) in &discovered_refs {
+                        if let Some(bname) = ref_name.strip_prefix("refs/heads/") {
+                            let rfile = git_dir.join("refs").join("remotes").join("origin").join(bname);
+                            if let Some(p) = rfile.parent() {
+                                let _ = fs::create_dir_all(p);
+                            }
+                            let _ = fs::write(&rfile, format!("{sha}\n"));
+
+                            if bname == initial_branch {
+                                let lfile = git_dir.join("refs").join("heads").join(bname);
+                                let _ = fs::write(&lfile, format!("{sha}\n"));
+                            }
+                        }
+                    }
+                }
+                format!("HTTP {}", resp.status)
+            }
             Err(e) => format!("HTTP fetch error: {e}"),
         };
 
@@ -184,7 +239,8 @@ impl<'a> RemoteTransport<'a> {
                 "target_path": dest.display().to_string(),
                 "branch": initial_branch,
                 "depth": depth,
-                "remote_handshake": handshake_status
+                "remote_handshake": handshake_status,
+                "discovered_refs": discovered_refs
             }),
             summary,
         ))
@@ -202,6 +258,8 @@ impl<'a> RemoteTransport<'a> {
         let remote_info = self.remote("get_url", Some(remote_name), None);
         let remote_url = remote_info.ok().and_then(|res| res.data["url"].as_str().map(String::from));
 
+        let mut updated_refs = BTreeMap::new();
+
         let handshake_status = if let Some(ref url) = remote_url {
             let info_refs_url = format!("{}/info/refs?service=git-upload-pack", url.trim_end_matches('/'));
             let mut headers = vec![("User-Agent".to_string(), "git/2.40 (Carapace)".to_string())];
@@ -215,7 +273,47 @@ impl<'a> RemoteTransport<'a> {
                 body: None,
             };
             match host::http_fetch(&http_req) {
-                Ok(resp) => format!("HTTP {}", resp.status),
+                Ok(resp) => {
+                    if let Some(ref body_bytes) = resp.body {
+                        let refs = parse_smart_http_refs(body_bytes);
+                        let remotes_dir = self.git_dir().join("refs").join("remotes").join(remote_name);
+                        let _ = fs::create_dir_all(&remotes_dir);
+
+                        for (ref_name, sha) in &refs {
+                            if let Some(bname) = ref_name.strip_prefix("refs/heads/") {
+                                if branch.is_none() || branch == Some(bname) {
+                                    let rfile = remotes_dir.join(bname);
+                                    if let Some(p) = rfile.parent() {
+                                        let _ = fs::create_dir_all(p);
+                                    }
+                                    let _ = fs::write(&rfile, format!("{sha}\n"));
+                                    updated_refs.insert(format!("{remote_name}/{bname}"), sha.clone());
+                                }
+                            } else if tags && ref_name.starts_with("refs/tags/") {
+                                let tag_name = &ref_name[10..];
+                                let tfile = self.git_dir().join("refs").join("tags").join(tag_name);
+                                if let Some(p) = tfile.parent() {
+                                    let _ = fs::create_dir_all(p);
+                                }
+                                let _ = fs::write(&tfile, format!("{sha}\n"));
+                                updated_refs.insert(format!("tags/{tag_name}"), sha.clone());
+                            }
+                        }
+
+                        if prune && remotes_dir.exists() {
+                            if let Ok(entries) = fs::read_dir(&remotes_dir) {
+                                for entry in entries.flatten() {
+                                    let fname = entry.file_name().to_string_lossy().to_string();
+                                    let full_ref = format!("refs/heads/{fname}");
+                                    if !refs.contains_key(&full_ref) {
+                                        let _ = fs::remove_file(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    format!("HTTP {}", resp.status)
+                }
                 Err(e) => format!("Fetch error: {e}"),
             }
         } else {
@@ -229,7 +327,8 @@ impl<'a> RemoteTransport<'a> {
                 "branch": branch,
                 "tags": tags,
                 "prune": prune,
-                "status": handshake_status
+                "status": handshake_status,
+                "updated_refs": updated_refs
             }),
             summary,
         ))
@@ -282,7 +381,18 @@ impl<'a> RemoteTransport<'a> {
                 body: None,
             };
             match host::http_fetch(&http_req) {
-                Ok(resp) => format!("HTTP {}", resp.status),
+                Ok(resp) => {
+                    // If successfully validated remote, update local tracking ref
+                    let branch_file = self.git_dir().join("refs").join("heads").join(branch_name);
+                    if let Ok(hash) = fs::read_to_string(&branch_file) {
+                        let remote_ref_file = self.git_dir().join("refs").join("remotes").join(remote_name).join(branch_name);
+                        if let Some(p) = remote_ref_file.parent() {
+                            let _ = fs::create_dir_all(p);
+                        }
+                        let _ = fs::write(&remote_ref_file, hash);
+                    }
+                    format!("HTTP {}", resp.status)
+                }
                 Err(e) => format!("Push error: {e}"),
             }
         } else {
@@ -305,4 +415,78 @@ impl<'a> RemoteTransport<'a> {
             summary,
         ))
     }
+}
+
+/// Parse smart HTTP packetline refs from Git upload-pack / receive-pack info/refs response
+pub fn parse_smart_http_refs(body: &[u8]) -> BTreeMap<String, String> {
+    let mut refs = BTreeMap::new();
+    let mut cursor = 0;
+
+    while cursor + 4 <= body.len() {
+        let len_hex_str = match std::str::from_utf8(&body[cursor..cursor + 4]) {
+            Ok(s) => s,
+            Err(_) => break,
+        };
+
+        let pkt_len = match usize::from_str_radix(len_hex_str, 16) {
+            Ok(l) => l,
+            Err(_) => {
+                cursor += 1;
+                continue;
+            }
+        };
+
+        if pkt_len == 0 {
+            // Flush pkt-line (0000)
+            cursor += 4;
+            continue;
+        }
+
+        if pkt_len < 4 || cursor + pkt_len > body.len() {
+            cursor += 4;
+            continue;
+        }
+
+        let payload = &body[cursor + 4..cursor + pkt_len];
+        cursor += pkt_len;
+
+        let line = String::from_utf8_lossy(payload);
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        if let (Some(hash), Some(name_with_caps)) = (parts.next(), parts.next()) {
+            if hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                let ref_name = name_with_caps.split('\0').next().unwrap_or(name_with_caps);
+                if ref_name.starts_with("refs/") || ref_name == "HEAD" {
+                    refs.insert(ref_name.to_string(), hash.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: If pkt-line parsing found nothing, try line-by-line fallback
+    if refs.is_empty() {
+        let text = String::from_utf8_lossy(body);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            if let (Some(hash), Some(name_with_caps)) = (parts.next(), parts.next()) {
+                if hash.len() == 40 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let ref_name = name_with_caps.split('\0').next().unwrap_or(name_with_caps);
+                    if ref_name.starts_with("refs/") || ref_name == "HEAD" {
+                        refs.insert(ref_name.to_string(), hash.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    refs
 }

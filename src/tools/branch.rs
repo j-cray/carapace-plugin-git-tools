@@ -153,6 +153,9 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
 
             let force = params.force.unwrap_or(false);
             if params.action == "delete" {
+                if let Err(e) = SafetyChecker::verify_destructive_allowed("git_branch (action: delete)", ctx) {
+                    return GitToolResult::err(e);
+                }
                 if let Some(ref b) = params.branch_name {
                     if let Err(e) = SafetyChecker::check_branch_protection(b, force, config, ctx) {
                         return GitToolResult::err(e);

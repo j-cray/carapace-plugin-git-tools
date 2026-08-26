@@ -20,6 +20,8 @@ serde_json = "1.0"
 thiserror = "2.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 gix = { version = "0.87", default-features = false, features = ["sha1", "revision", "index", "status", "dirwalk", "blob-diff", "merge", "blame", "attributes", "excludes", "serde"] }
+sha1 = "0.10"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -119,7 +119,7 @@ struct TagParams {
     message: Option<String>,
 }
 
-pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolContext) -> GitToolResult {
+pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
     match name {
         "git_commit" => {
             let params: CommitParams = match serde_json::from_str(params_json) {
@@ -158,6 +158,13 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(e),
             };
+
+            if params.action == "delete" {
+                if let Err(e) = SafetyChecker::verify_destructive_allowed("git_tag (action: delete)", ctx) {
+                    return GitToolResult::err(e);
+                }
+            }
+
             let engine = GitEngine::new(path, config);
             engine
                 .tag(
