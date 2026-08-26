@@ -18,7 +18,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "action": {
                         "type": "string",
@@ -42,7 +42,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Force branch creation or deletion (defaults to false)."
                     }
                 },
-                "required": ["action"],
+                "required": ["repo_path", "action"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -56,7 +56,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "branch_name": {
                         "type": "string",
@@ -71,7 +71,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Starting commit/branch if creating new branch (defaults to HEAD)."
                     }
                 },
-                "required": ["branch_name"],
+                "required": ["repo_path", "branch_name"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "source_ref": {
                         "type": "string",
@@ -104,7 +104,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Produce working tree and index changes without creating a merge commit."
                     }
                 },
-                "required": ["source_ref"],
+                "required": ["repo_path", "source_ref"],
                 "additionalProperties": false
             })
             .to_string(),

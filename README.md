@@ -59,9 +59,6 @@ Configure the plugin in your Carapace configuration file (e.g. `carapace.json` o
       ],
     },
     "git-tools": {
-      // Default repository path if not supplied in tool calls
-      default_repo_path: "/home/user/projects/my-app",
-
       // Author metadata for AI commits
       author_name: "Carapace AI",
       author_email: "carapace-ai@example.com",

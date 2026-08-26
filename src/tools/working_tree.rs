@@ -18,7 +18,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "paths": {
                         "type": "array",
@@ -30,6 +30,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "If true, stages all modified, deleted, and untracked files."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -43,7 +44,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "paths": {
                         "type": "array",
@@ -55,7 +56,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "If true, unstage paths from index without discarding working tree changes."
                     }
                 },
-                "required": ["paths"],
+                "required": ["repo_path", "paths"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -69,7 +70,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "paths": {
                         "type": "array",
@@ -86,6 +87,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Commit or reference to reset to (defaults to HEAD)."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -99,7 +101,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "dry_run": {
                         "type": "boolean",
@@ -114,6 +116,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Required to execute actual deletion if not dry_run."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),

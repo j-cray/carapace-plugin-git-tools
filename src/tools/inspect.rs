@@ -18,9 +18,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path (defaults to configured workspace root)."
+                        "description": "Path to the git repository."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -34,7 +35,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "staged": {
                         "type": "boolean",
@@ -54,6 +55,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Maximum number of diff lines to return (defaults to 500)."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -67,7 +69,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "max_count": {
                         "type": "integer",
@@ -82,6 +84,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Optional revision range (e.g. 'main', 'HEAD~5..HEAD')."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -95,13 +98,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "revision": {
                         "type": "string",
                         "description": "Commit hash, tag name, or revision to inspect (defaults to HEAD)."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -115,14 +119,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "file_path": {
                         "type": "string",
                         "description": "Relative file path to blame."
                     }
                 },
-                "required": ["file_path"],
+                "required": ["repo_path", "file_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -136,14 +140,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "revision": {
                         "type": "string",
                         "description": "Revision to parse (e.g. 'HEAD', 'main', tag name, or short hash)."
                     }
                 },
-                "required": ["revision"],
+                "required": ["repo_path", "revision"],
                 "additionalProperties": false
             })
             .to_string(),

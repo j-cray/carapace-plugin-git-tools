@@ -53,6 +53,17 @@ fn test_tool_definitions_schema_validity() {
         let schema: serde_json::Value = serde_json::from_str(&def.input_schema)
             .unwrap_or_else(|_| panic!("Input schema for '{}' should be valid JSON", expected));
         assert_eq!(schema["type"], "object", "Input schema for '{}' should be of type object", expected);
+
+        let required = schema["required"].as_array().expect("Required array should be present");
+        if expected == "git_clone" {
+            assert!(required.iter().any(|r| r == "url"), "git_clone must require url");
+        } else {
+            assert!(
+                required.iter().any(|r| r == "repo_path"),
+                "Tool '{}' must require repo_path",
+                expected
+            );
+        }
     }
 }
 
@@ -364,6 +375,15 @@ fn test_safety_path_containment_and_normalization() {
     assert_eq!(normalize_path(&PathBuf::from("/foo/bar/../baz")), PathBuf::from("/foo/baz"));
     assert_eq!(normalize_path(&PathBuf::from("/foo/../../bar")), PathBuf::from("/bar"));
     assert_eq!(normalize_path(&PathBuf::from("./a/b/../c")), PathBuf::from("a/c"));
+
+    // Missing or empty repo_path should error
+    let missing_path = SafetyChecker::resolve_repo_path(None, &config);
+    assert!(missing_path.is_err());
+    assert!(missing_path.unwrap_err().contains("repo_path"));
+
+    let empty_path = SafetyChecker::resolve_repo_path(Some("   "), &config);
+    assert!(empty_path.is_err());
+    assert!(empty_path.unwrap_err().contains("repo_path"));
 }
 
 #[test]
@@ -405,10 +425,8 @@ fn test_safety_protected_branch_and_sandboxing() {
 fn test_dispatch_integration() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let repo_path = temp_dir.path().to_path_buf();
-    let config = PluginConfig {
-        default_repo_path: repo_path.display().to_string(),
-        ..Default::default()
-    };
+    let repo_str = repo_path.display().to_string();
+    let config = PluginConfig::default();
     let ctx = ToolContext {
         agent_id: Some("test-agent".to_string()),
         session_key: Some("test-session".to_string()),
@@ -423,41 +441,47 @@ fn test_dispatch_integration() {
     // Create file
     fs::write(repo_path.join("app.rs"), "fn run() {}\n").unwrap();
 
-    // Test git_status dispatch
-    let res_status = tools::dispatch("git_status", "{}", &config, &ctx);
+    // Test git_status dispatch with repo_path
+    let res_status = tools::dispatch("git_status", &format!(r#"{{"repo_path": "{repo_str}"}}"#), &config, &ctx);
     assert!(res_status.success);
 
     // Test git_add dispatch
-    let res_add = tools::dispatch("git_add", r#"{"all": true}"#, &config, &ctx);
+    let res_add = tools::dispatch("git_add", &format!(r#"{{"repo_path": "{repo_str}", "all": true}}"#), &config, &ctx);
     assert!(res_add.success);
 
     // Test git_commit dispatch
-    let res_commit = tools::dispatch("git_commit", r#"{"message": "feat: init app"}"#, &config, &ctx);
+    let res_commit = tools::dispatch("git_commit", &format!(r#"{{"repo_path": "{repo_str}", "message": "feat: init app"}}"#), &config, &ctx);
     assert!(res_commit.success);
 
     // Test git_log dispatch
-    let res_log = tools::dispatch("git_log", r#"{"max_count": 5}"#, &config, &ctx);
+    let res_log = tools::dispatch("git_log", &format!(r#"{{"repo_path": "{repo_str}", "max_count": 5}}"#), &config, &ctx);
     assert!(res_log.success);
 
     // Test git_branch dispatch
-    let res_branch = tools::dispatch("git_branch", r#"{"action": "list"}"#, &config, &ctx);
+    let res_branch = tools::dispatch("git_branch", &format!(r#"{{"repo_path": "{repo_str}", "action": "list"}}"#), &config, &ctx);
     assert!(res_branch.success);
 
     // Test git_rev_parse dispatch
-    let res_rev = tools::dispatch("git_rev_parse", r#"{"revision": "HEAD"}"#, &config, &ctx);
+    let res_rev = tools::dispatch("git_rev_parse", &format!(r#"{{"repo_path": "{repo_str}", "revision": "HEAD"}}"#), &config, &ctx);
     assert!(res_rev.success);
 
     // Test git_remote dispatch
-    let res_remote = tools::dispatch("git_remote", r#"{"action": "list"}"#, &config, &ctx);
+    let res_remote = tools::dispatch("git_remote", &format!(r#"{{"repo_path": "{repo_str}", "action": "list"}}"#), &config, &ctx);
     assert!(res_remote.success);
 
     // Test unknown tool dispatch
     let res_unknown = tools::dispatch("git_nonexistent", "{}", &config, &ctx);
     assert!(!res_unknown.success);
 
-    // Test dispatch with empty parameters string
+    // Test dispatch without repo_path should fail with error
+    let res_missing_param = tools::dispatch("git_status", "{}", &config, &ctx);
+    assert!(!res_missing_param.success);
+    assert!(res_missing_param.error.unwrap().contains("repo_path"));
+
+    // Test dispatch with empty parameters string should fail
     let res_empty_param = tools::dispatch("git_status", "", &config, &ctx);
-    assert!(res_empty_param.success);
+    assert!(!res_empty_param.success);
+    assert!(res_empty_param.error.unwrap().contains("repo_path"));
 }
 
 #[test]
@@ -465,7 +489,6 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let repo_path = temp_dir.path().to_path_buf();
     let config = PluginConfig {
-        default_repo_path: repo_path.display().to_string(),
         author_name: "Test Agent".to_string(),
         author_email: "agent@test.com".to_string(),
         ..Default::default()
@@ -527,7 +550,12 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     assert!(repo_path.join("file2.txt").exists(), "file2.txt should be restored after resetting to HEAD~1");
 
     // Test branch rename protection
-    let rename_protected = tools::dispatch("git_branch", r#"{"action": "rename", "branch_name": "main", "new_name": "renamed_main"}"#, &config, &ctx);
+    let rename_protected = tools::dispatch(
+        "git_branch",
+        &format!(r#"{{"repo_path": "{}", "action": "rename", "branch_name": "main", "new_name": "renamed_main"}}"#, repo_path.display()),
+        &config,
+        &ctx,
+    );
     assert!(!rename_protected.success, "Renaming protected branch without force should fail");
 }
 
@@ -536,7 +564,6 @@ fn test_stash_cleanliness_and_packed_refs() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let repo_path = temp_dir.path().to_path_buf();
     let config = PluginConfig {
-        default_repo_path: repo_path.display().to_string(),
         author_name: "Stash Agent".to_string(),
         author_email: "stash@agent.ai".to_string(),
         ..Default::default()
@@ -742,10 +769,7 @@ fn test_clean_nested_empty_directories() {
 fn test_branch_rename_target_protection() {
     let temp_dir = TempDir::new().expect("Failed to create tempdir");
     let repo_path = temp_dir.path().to_path_buf();
-    let config = PluginConfig {
-        default_repo_path: repo_path.display().to_string(),
-        ..Default::default()
-    };
+    let config = PluginConfig::default();
     let normal_ctx = ToolContext {
         agent_id: Some("agent-1".to_string()),
         session_key: Some("main".to_string()),
@@ -771,7 +795,7 @@ fn test_branch_rename_target_protection() {
     // Renaming temp-feat to protected branch "main" without force should fail
     let res_rename_unforced = tools::dispatch(
         "git_branch",
-        r#"{"action": "rename", "branch_name": "temp-feat", "new_name": "main"}"#,
+        &format!(r#"{{"repo_path": "{}", "action": "rename", "branch_name": "temp-feat", "new_name": "main"}}"#, repo_path.display()),
         &config,
         &normal_ctx,
     );
@@ -780,7 +804,7 @@ fn test_branch_rename_target_protection() {
     // Renaming temp-feat to "main" in sandboxed mode with force: true should fail
     let res_rename_sandboxed = tools::dispatch(
         "git_branch",
-        r#"{"action": "rename", "branch_name": "temp-feat", "new_name": "main", "force": true}"#,
+        &format!(r#"{{"repo_path": "{}", "action": "rename", "branch_name": "temp-feat", "new_name": "main", "force": true}}"#, repo_path.display()),
         &config,
         &sandboxed_ctx,
     );

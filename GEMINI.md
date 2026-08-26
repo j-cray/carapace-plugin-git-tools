@@ -39,7 +39,6 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
    - `git_push`: Push local commits/tags to remote repositories.
 
 ### Configuration (`plugins.git-tools.*`)
-- `default_repo_path`: Default repository directory (defaults to current directory).
 - `author_name`: Author name for commits (default: `"Carapace Agent"`).
 - `author_email`: Author email for commits (default: `"carapace-agent@local"`).
 - `allowed_roots`: Comma-separated or JSON list of directory path prefixes allowed for repository access.

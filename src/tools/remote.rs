@@ -18,7 +18,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "action": {
                         "type": "string",
@@ -34,7 +34,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "URL of the remote repository (required for 'add')."
                     }
                 },
-                "required": ["action"],
+                "required": ["repo_path", "action"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -77,7 +77,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "remote": {
                         "type": "string",
@@ -96,6 +96,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Remove remote-tracking refs that no longer exist on the remote."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -109,7 +110,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "remote": {
                         "type": "string",
@@ -124,6 +125,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Rebase the current branch on top of the upstream branch after fetching."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -137,7 +139,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "remote": {
                         "type": "string",
@@ -160,6 +162,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Push all local tags."
                     }
                 },
+                "required": ["repo_path"],
                 "additionalProperties": false
             })
             .to_string(),

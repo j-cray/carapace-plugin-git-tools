@@ -12,7 +12,12 @@ impl SafetyChecker {
     ) -> Result<PathBuf, String> {
         let raw_path = match repo_path {
             Some(p) if !p.trim().is_empty() => p.trim(),
-            _ => &config.default_repo_path,
+            _ => {
+                return Err(
+                    "Missing required parameter: 'repo_path' (repository path must be explicitly provided)"
+                        .to_string(),
+                );
+            }
         };
 
         let path = PathBuf::from(raw_path);

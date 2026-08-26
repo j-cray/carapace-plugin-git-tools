@@ -2,7 +2,6 @@ use crate::bindings::carapace::plugin::host;
 
 #[derive(Debug, Clone)]
 pub struct PluginConfig {
-    pub default_repo_path: String,
     pub author_name: String,
     pub author_email: String,
     pub allowed_roots: Vec<String>,
@@ -14,7 +13,6 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            default_repo_path: ".".to_string(),
             author_name: "Carapace Agent".to_string(),
             author_email: "carapace-agent@local".to_string(),
             allowed_roots: Vec::new(),
@@ -34,13 +32,6 @@ impl Default for PluginConfig {
 impl PluginConfig {
     pub fn load() -> Self {
         let mut config = Self::default();
-
-        if let Some(val) = host::config_get("default_repo_path") {
-            let trimmed = val.trim();
-            if !trimmed.is_empty() {
-                config.default_repo_path = trimmed.to_string();
-            }
-        }
 
         if let Some(val) = host::config_get("author_name") {
             let trimmed = val.trim();

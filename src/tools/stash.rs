@@ -17,7 +17,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "properties": {
                 "repo_path": {
                     "type": "string",
-                    "description": "Optional repository path."
+                    "description": "Path to the git repository."
                 },
                 "action": {
                     "type": "string",
@@ -37,7 +37,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "description": "If true, also stash untracked files."
                 }
             },
-            "required": ["action"],
+            "required": ["repo_path", "action"],
             "additionalProperties": false
         })
         .to_string(),

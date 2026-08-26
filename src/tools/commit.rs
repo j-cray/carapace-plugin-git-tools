@@ -18,7 +18,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "message": {
                         "type": "string",
@@ -29,7 +29,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Allow recording a commit that has no changes."
                     }
                 },
-                "required": ["message"],
+                "required": ["repo_path", "message"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -43,7 +43,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "commit_ref": {
                         "type": "string",
@@ -54,7 +54,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Apply reverted changes to the working tree without immediately committing."
                     }
                 },
-                "required": ["commit_ref"],
+                "required": ["repo_path", "commit_ref"],
                 "additionalProperties": false
             })
             .to_string(),
@@ -68,7 +68,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "repo_path": {
                         "type": "string",
-                        "description": "Optional repository path."
+                        "description": "Path to the git repository."
                     },
                     "action": {
                         "type": "string",
@@ -88,7 +88,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "description": "Optional annotation message for the tag."
                     }
                 },
-                "required": ["action"],
+                "required": ["repo_path", "action"],
                 "additionalProperties": false
             })
             .to_string(),
