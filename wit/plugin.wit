@@ -1,0 +1,674 @@
+// Carapace Plugin Interface
+// WIT (WebAssembly Interface Types) definition for WASM plugins
+//
+// SECURITY MODEL
+// ==============
+// Plugins run in sandboxed WASM environments with capability-based access.
+// The host enforces the following security boundaries:
+//
+// 1. CREDENTIAL ISOLATION
+//    - All credential keys are automatically prefixed with the plugin ID
+//    - Plugin "msteams" calling credential-get("token") reads "msteams:token"
+//    - Plugins cannot access other plugins' credentials
+//
+// 2. SSRF PROTECTION
+//    - Both media-fetch and http-fetch block requests to:
+//      - IPv4 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+//      - IPv4 link-local: 169.254.0.0/16
+//      - IPv4 localhost: 127.0.0.0/8
+//      - IPv6 private: fc00::/7 (unique local addresses)
+//      - IPv6 link-local: fe80::/10
+//      - IPv6 localhost: ::1
+//      - Cloud metadata endpoints (169.254.169.254, fd00:ec2::254)
+//    - Only HTTP/HTTPS protocols allowed
+//
+// 3. CONFIG ACCESS
+//    - Plugins can only read keys under "plugins.<plugin-id>.*"
+//    - Gateway-level config (tokens, auth) is not accessible
+//
+// 4. RESOURCE LIMITS (enforced by host)
+//    - Memory: 64MB per plugin instance
+//    - Execution: 30s timeout per function call
+//    - HTTP requests: 100/minute rate limit per plugin
+//    - Body size: 10MB max for HTTP request/response bodies
+//
+// 5. WEBHOOK PATH NAMESPACING (BREAKING CHANGE from Node gateway)
+//    - Plugin webhook paths are prefixed: /plugins/<plugin-id>/<path>
+//    - Plugins cannot register paths outside their namespace
+//    - Node gateway allowed arbitrary paths via registerHttpRoute()
+//    - Rust gateway enforces namespacing for security isolation
+//    - Migration: update webhook URLs to include /plugins/<plugin-id>/ prefix
+//
+// 6. HOOK MODIFICATION POLICY
+//    - Only specific hooks allow payload modification (documented per hook)
+//    - Unauthorized modifications are ignored by the host
+
+package carapace:plugin@1.0.0;
+
+// Core types shared across all capabilities
+interface types {
+    // Result type for operations that can fail
+    record plugin-error {
+        code: string,
+        message: string,
+        retryable: bool,
+    }
+
+    // Message delivery result
+    record delivery-result {
+        ok: bool,
+        message-id: option<string>,
+        error: option<string>,
+        // v1 compatibility: retryable is boolean-only. Native channels can
+        // surface Retry-After metadata; WASM providers need a future WIT
+        // version before they can return retry-after-ms.
+        retryable: bool,
+    }
+
+    // Media attachment
+    // SECURITY: URLs are validated by host before fetch
+    record media-attachment {
+        url: string,              // Max 2048 chars, must be http/https
+        mime-type: option<string>,
+        filename: option<string>, // Max 255 chars, sanitized by host
+        size: option<u64>,        // Max 100MB
+    }
+
+    // Chat types supported by channels
+    enum chat-type {
+        dm,
+        group,
+        channel,
+        thread,
+    }
+
+    // Inbound message from a channel
+    record inbound-message {
+        channel-id: string,         // Plugin's own channel ID
+        account-id: option<string>,
+        %from: string,               // Sender identifier (platform-specific)
+        sender-name: option<string>,
+        text: string,               // Max 64KB
+        media: option<media-attachment>,
+        reply-to-id: option<string>,
+        thread-id: option<string>,
+        timestamp: u64,             // Unix milliseconds
+        chat-type: chat-type,
+        group-id: option<string>,
+        group-name: option<string>,
+    }
+
+    // Outbound message context
+    record outbound-context {
+        to: string,                 // Recipient identifier
+        text: string,               // Max 64KB
+        media-url: option<string>,  // Validated by host (SSRF protection)
+        gif-playback: bool,
+        reply-to-id: option<string>,
+        thread-id: option<string>,
+        account-id: option<string>,
+    }
+
+    // Poll input
+    record poll-input {
+        question: string,           // Max 300 chars
+        options: list<string>,      // 2-12 options, each max 100 chars
+        allow-multiple: bool,
+    }
+
+    // Poll context for sending
+    record poll-context {
+        to: string,
+        poll: poll-input,
+        account-id: option<string>,
+    }
+
+    // Tool invocation context
+    // SECURITY: sandboxed flag indicates restricted execution environment
+    record tool-context {
+        agent-id: option<string>,
+        session-key: option<string>,
+        message-channel: option<string>,
+        sandboxed: bool,            // If true, tool has reduced capabilities
+    }
+
+    // Tool result
+    record tool-result {
+        success: bool,
+        %result: option<string>,     // Max 1MB
+        error: option<string>,      // Max 4KB
+    }
+
+    // Hook event
+    record hook-event {
+        hook-name: string,
+        payload: string,            // JSON, max 1MB
+    }
+
+    // Hook result
+    // SECURITY: modified-payload only honored for modifiable hooks
+    record hook-result {
+        handled: bool,
+        cancel: bool,               // Only honored for cancellable hooks
+        modified-payload: option<string>,
+    }
+}
+
+// Channel capabilities declaration
+interface channel-meta {
+    use types.{chat-type};
+
+    // Channel metadata
+    record channel-info {
+        id: string,                 // Lowercase alphanumeric + hyphens, max 32 chars
+        label: string,              // Display name, max 64 chars
+        selection-label: string,    // Short label for selection UI
+        docs-path: string,          // Path in docs (e.g., "/channels/msteams")
+        blurb: string,              // Short description, max 200 chars
+        order: u32,                 // Display order (lower = higher priority)
+    }
+
+    // Channel capabilities - declares what the channel supports
+    record channel-capabilities {
+        chat-types: list<chat-type>,
+        polls: bool,
+        reactions: bool,
+        edit: bool,
+        unsend: bool,
+        reply: bool,
+        effects: bool,
+        group-management: bool,
+        threads: bool,
+        media: bool,
+        native-commands: bool,
+        block-streaming: bool,      // If true, don't stream responses
+    }
+
+    // Get channel metadata
+    get-info: func() -> channel-info;
+
+    // Get channel capabilities
+    get-capabilities: func() -> channel-capabilities;
+}
+
+// Channel adapter for outbound messaging
+interface channel-adapter {
+    use types.{outbound-context, delivery-result, poll-context, plugin-error};
+
+    // Send a text message
+    send-text: func(ctx: outbound-context) -> result<delivery-result, plugin-error>;
+
+    // Send a media message
+    // SECURITY: media-url validated by host before plugin receives it
+    send-media: func(ctx: outbound-context) -> result<delivery-result, plugin-error>;
+
+    // Send a poll
+    send-poll: func(ctx: poll-context) -> result<delivery-result, plugin-error>;
+
+    // Edit a message
+    edit-message: func(message-id: string, new-text: string) -> result<delivery-result, plugin-error>;
+
+    // Delete a message
+    delete-message: func(message-id: string) -> result<delivery-result, plugin-error>;
+
+    // React to a message
+    react: func(message-id: string, emoji: string) -> result<delivery-result, plugin-error>;
+}
+
+// Tool definition and execution
+interface tool {
+    use types.{tool-context, tool-result, plugin-error};
+
+    // Tool metadata
+    record tool-definition {
+        name: string,               // Lowercase alphanumeric + underscores, max 64 chars
+        description: string,        // Max 1024 chars
+        input-schema: string,       // JSON Schema, max 64KB
+    }
+
+    // Get tool definitions provided by this plugin
+    get-definitions: func() -> list<tool-definition>;
+
+    // Invoke a tool
+    // SECURITY: ctx.sandboxed indicates restricted environment
+    invoke: func(name: string, params: string, ctx: tool-context) -> result<tool-result, plugin-error>;
+}
+
+// Webhook handling
+interface webhook {
+    use types.{plugin-error};
+
+    // Webhook request
+    // SECURITY: Host validates and sanitizes before passing to plugin
+    record webhook-request {
+        method: string,             // GET, POST, PUT, DELETE, PATCH
+        path: string,               // Path within plugin namespace (without /plugins/<id> prefix)
+        headers: list<tuple<string, string>>,  // Hop-by-hop headers stripped
+        body: option<list<u8>>,     // Max 10MB
+        query: option<string>,      // URL-decoded query string
+    }
+
+    // Webhook response
+    record webhook-response {
+        status: u16,                // HTTP status code
+        headers: list<tuple<string, string>>,  // Host may add security headers
+        body: option<list<u8>>,     // Max 10MB
+    }
+
+    // Get webhook paths this plugin handles
+    // SECURITY: Paths are prefixed with /plugins/<plugin-id>/ by host
+    get-paths: func() -> list<string>;
+
+    // Handle a webhook request
+    handle: func(req: webhook-request) -> result<webhook-response, plugin-error>;
+}
+
+// Service lifecycle
+interface service {
+    use types.{plugin-error};
+
+    // Start the service
+    // Called when gateway starts or plugin is loaded
+    start: func() -> result<_, plugin-error>;
+
+    // Stop the service
+    // Called when gateway stops or plugin is unloaded
+    // SECURITY: Must complete within 5s or will be force-terminated
+    stop: func() -> result<_, plugin-error>;
+
+    // Health check
+    // Called periodically (every 30s) to verify service is responsive
+    health: func() -> bool;
+}
+
+// Hook handling
+interface hooks {
+    use types.{hook-event, hook-result, plugin-error};
+
+    // Get hooks this plugin handles
+    // Valid hooks (from src/plugins/types.ts PluginHookName):
+    //
+    //   Agent lifecycle:
+    //     - before_agent_start: Before agent processes message (MODIFIABLE: can inject context)
+    //     - agent_end: After agent completes (read-only)
+    //   Session lifecycle:
+    //     - session_start: When a session begins (read-only)
+    //     - session_end: When a session ends (read-only)
+    //   Compaction:
+    //     - before_compaction: Before message history is compacted (read-only)
+    //     - after_compaction: After compaction completes (read-only)
+    //   Message flow:
+    //     - message_received: Inbound message received (read-only)
+    //     - message_sending: Outbound message about to send (MODIFIABLE)
+    //     - message_sent: Outbound message successfully sent (read-only)
+    //   Tool execution:
+    //     - before_tool_call: Before tool is invoked (MODIFIABLE: can modify args)
+    //     - after_tool_call: After tool returns (read-only)
+    //     - tool_result_persist: Before tool result is persisted (MODIFIABLE: can transform for storage)
+    //   Gateway lifecycle:
+    //     - gateway_start: Gateway has started (read-only)
+    //     - gateway_stop: Gateway is stopping (read-only)
+    //
+    // MODIFIABLE hooks: before_agent_start, message_sending, before_tool_call, tool_result_persist
+    // All other hooks are read-only; modified_payload is ignored.
+    //
+    // HOOK PAYLOAD/RESULT SCHEMAS (JSON):
+    // ====================================
+    // Hook payloads and results are JSON strings. Schemas match src/plugins/types.ts exactly.
+    // Context objects are passed separately from event payloads.
+    //
+    // before_agent_start:
+    //   Event:   { prompt: string, messages?: array }
+    //   Context: { agentId?, sessionKey?, workspaceDir?, messageProvider? }
+    //   Result:  { systemPrompt?: string, prependContext?: string }
+    //
+    // agent_end:
+    //   Event:   { messages: array, success: bool, error?: string, durationMs?: number }
+    //   Context: { agentId?, sessionKey?, workspaceDir?, messageProvider? }
+    //   Result:  (none - read-only)
+    //
+    // session_start:
+    //   Event:   { sessionId: string, resumedFrom?: string }
+    //   Context: { agentId?, sessionId }
+    //   Result:  (none - read-only)
+    //
+    // session_end:
+    //   Event:   { sessionId: string, messageCount: number, durationMs?: number }
+    //   Context: { agentId?, sessionId }
+    //   Result:  (none - read-only)
+    //
+    // before_compaction:
+    //   Event:   { messageCount: number, tokenCount?: number }
+    //   Result:  (none - read-only)
+    //
+    // after_compaction:
+    //   Event:   { messageCount: number, tokenCount?: number, compactedCount: number }
+    //   Result:  (none - read-only)
+    //
+    // message_received:
+    //   Event:   { from: string, content: string, timestamp?: number, metadata?: object }
+    //   Context: { channelId: string, accountId?, conversationId? }
+    //   Result:  (none - read-only)
+    //
+    // message_sending:
+    //   Event:   { to: string, content: string, metadata?: object }
+    //   Context: { channelId: string, accountId?, conversationId? }
+    //   Result:  { content?: string, cancel?: bool }
+    //
+    // message_sent:
+    //   Event:   { to: string, content: string, success: bool, error?: string }
+    //   Context: { channelId: string, accountId?, conversationId? }
+    //   Result:  (none - read-only)
+    //
+    // before_tool_call:
+    //   Event:   { toolName: string, params: object }
+    //   Context: { agentId?, sessionKey?, toolName }
+    //   Result:  { params?: object, block?: bool, blockReason?: string }
+    //
+    // after_tool_call:
+    //   Event:   { toolName: string, params: object, result?: any, error?: string, durationMs?: number }
+    //   Context: { agentId?, sessionKey?, toolName }
+    //   Result:  (none - read-only)
+    //
+    // tool_result_persist:
+    //   Event:   { toolName?: string, toolCallId?: string, message: AgentMessage, isSynthetic?: bool }
+    //   Context: { agentId?, sessionKey?, toolName?, toolCallId? }
+    //   Result:  { message?: AgentMessage }
+    //
+    // gateway_start:
+    //   Event:   { port: number }
+    //   Context: { port? }
+    //   Result:  (none - read-only)
+    //
+    // gateway_stop:
+    //   Event:   { reason?: string }
+    //   Context: { port? }
+    //   Result:  (none - read-only)
+    //
+    get-hooks: func() -> list<string>;
+
+    // Handle a hook event
+    handle: func(event: hook-event) -> result<hook-result, plugin-error>;
+}
+
+// Host-provided capabilities for plugins
+// SECURITY: All functions enforce plugin isolation and resource limits
+interface host {
+    // Logging - rate limited to 1000 messages/minute
+    log-debug: func(message: string);   // Max 4KB per message
+    log-info: func(message: string);
+    log-warn: func(message: string);
+    log-error: func(message: string);
+
+    // Configuration - scoped to plugins.<plugin-id>.*
+    // SECURITY: Cannot read gateway-level config
+    config-get: func(key: string) -> option<string>;
+
+    // Credentials (secure storage)
+    // SECURITY: Keys automatically prefixed with plugin ID
+    // Plugin calls credential-get("token") -> host reads "<plugin-id>:token"
+    credential-get: func(key: string) -> option<string>;
+    credential-set: func(key: string, value: string) -> bool;
+
+    // Media fetch (with SSRF protection)
+    // SECURITY: Blocks private IPs, localhost, metadata endpoints
+    record media-fetch-result {
+        ok: bool,
+        local-path: option<string>, // Temporary path, valid for 1 hour
+        mime-type: option<string>,
+        size: option<u64>,
+        error: option<string>,
+    }
+    media-fetch: func(url: string, max-bytes: option<u64>, timeout-ms: option<u32>) -> media-fetch-result;
+
+    // HTTP client (outbound requests)
+    // SECURITY: Same SSRF protections as media-fetch
+    // SECURITY: Rate limited to 100 requests/minute per plugin
+    record http-request {
+        method: string,             // GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+        url: string,                // Must be http/https, max 2048 chars
+        headers: list<tuple<string, string>>,  // Host header set by host
+        body: option<list<u8>>,     // Max 10MB
+    }
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,     // Max 10MB
+    }
+    http-fetch: func(req: http-request) -> result<http-response, string>;
+}
+
+// Plugin manifest
+interface manifest {
+    // Plugin kinds
+    enum plugin-kind {
+        channel,
+        tool,
+        webhook,
+        service,
+        hook,
+    }
+
+    // Plugin manifest
+    record plugin-manifest {
+        id: string,                 // Lowercase alphanumeric + hyphens, max 32 chars
+        name: string,               // Display name, max 64 chars
+        description: string,        // Max 500 chars
+        version: string,            // Semver format
+        kind: plugin-kind,
+    }
+
+    // Get plugin manifest
+    get-manifest: func() -> plugin-manifest;
+}
+
+// World definition for channel plugins
+world channel-plugin {
+    import host;
+    export manifest;
+    export channel-meta;
+    export channel-adapter;
+    export hooks;
+}
+
+// World definition for tool plugins
+world tool-plugin {
+    import host;
+    export manifest;
+    export tool;
+}
+
+// World definition for webhook plugins
+world webhook-plugin {
+    import host;
+    export manifest;
+    export webhook;
+}
+
+// World definition for service plugins
+world service-plugin {
+    import host;
+    export manifest;
+    export service;
+}
+
+// Provider plugin interface
+// Providers supply AI model access (e.g., copilot-proxy, qwen-portal-auth)
+//
+// ARCHITECTURE NOTE:
+// In the Node gateway, provider plugins use registerProvider() with interactive
+// auth flows (prompts, configPatch, profiles). WASM plugins cannot do interactive
+// auth because:
+//   1. No access to terminal/UI prompts from WASM sandbox
+//   2. Config mutations require host coordination
+//
+// Therefore, WASM provider plugins handle INFERENCE ONLY:
+//   - Auth/registration is configured via host config or CLI
+//   - Credentials are passed to the plugin via host credential store
+//   - Plugin focuses on model communication (completions, streaming)
+//
+// For providers requiring interactive auth (OAuth, API key wizards), use:
+//   - Host-side auth flows that store credentials
+//   - Plugin reads credentials via credential-get()
+//   - Or use native (non-WASM) provider plugins
+interface provider {
+    use types.{plugin-error};
+
+    // Provider metadata
+    record provider-info {
+        id: string,                 // Lowercase alphanumeric + hyphens, max 32 chars
+        label: string,              // Display name, max 64 chars
+        model-family: string,       // e.g., "openai", "anthropic", "google"
+        docs-path: string,          // Path in docs (e.g., "/providers/copilot-proxy")
+        supports-streaming: bool,
+        supports-tools: bool,
+        supports-vision: bool,
+    }
+
+    // Model API type (matches src/config/types.models.ts ModelApi)
+    enum model-api {
+        openai-completions,
+        openai-responses,
+        anthropic-messages,
+        google-generative-ai,
+        github-copilot,
+        bedrock-converse-stream,
+    }
+
+    // Model cost structure (per million tokens)
+    record model-cost {
+        input: f64,                 // Input token cost
+        output: f64,                // Output token cost
+        cache-read: f64,            // Cached input read cost
+        cache-write: f64,           // Cache write cost
+    }
+
+    // Input modality (matches Node's "text" | "image")
+    enum input-modality {
+        text,
+        image,
+    }
+
+    // Model compatibility flags (all optional to match Node's ModelCompatConfig)
+    record model-compat {
+        supports-store: option<bool>,              // Supports response storage
+        supports-developer-role: option<bool>,     // Supports developer message role
+        supports-reasoning-effort: option<bool>,   // Supports reasoning effort parameter
+        // VALIDATION: Host must reject values other than "max_completion_tokens" or "max_tokens"
+        max-tokens-field: option<string>,
+    }
+
+    // PROVIDER MODEL VALIDATION (host-enforced):
+    // ============================================
+    // The host validates provider model definitions at registration time:
+    //
+    // 1. model-definition.id: non-empty, max 128 chars
+    //    Allowed characters: alphanumeric, hyphens, dots, slashes, colons, underscores
+    //    (matches existing Node model IDs like "openrouter/anthropic/claude-3", "hf:model")
+    // 2. model-definition.name: non-empty, max 256 chars
+    // 3. model-definition.input: if empty, host defaults to [text] (matches Node behavior)
+    // 4. model-definition.cost: all values must be >= 0
+    // 5. model-definition.context-window: must be > 0
+    // 6. model-definition.max-tokens: must be > 0 and <= context-window
+    // 7. model-compat.max-tokens-field: if present, must be "max_completion_tokens" or "max_tokens"
+    //
+    // Invalid models are rejected with plugin-error { code: "INVALID_MODEL", message: "<details>" }
+    // The host logs validation failures for debugging.
+
+    // Model definition for registration (matches src/config/types.models.ts ModelDefinitionConfig)
+    record model-definition {
+        id: string,                 // Model ID (e.g., "gpt-4o")
+        name: string,               // Display name (matches Node's "name" field)
+        api: option<model-api>,     // API type (inherits from provider if not set)
+        reasoning: bool,            // Whether model supports reasoning/thinking
+        input: list<input-modality>, // Input modalities (matches Node's "input" field)
+        cost: model-cost,           // Token costs for usage reporting
+        context-window: u32,        // Max context tokens
+        max-tokens: u32,            // Max output tokens
+        headers: option<string>,    // JSON object of custom headers
+        compat: option<model-compat>, // Compatibility flags
+    }
+
+    // Chat message for completion requests
+    record chat-message {
+        role: string,               // "system", "user", "assistant", "tool"
+        content: string,            // Max 1MB
+        name: option<string>,       // For tool messages
+        tool-call-id: option<string>,
+    }
+
+    // Completion request
+    record completion-request {
+        model: string,
+        messages: list<chat-message>,
+        max-tokens: option<u32>,
+        temperature: option<f32>,   // 0.0-2.0
+        %stream: bool,
+        tools: option<string>,      // JSON array of tool definitions
+    }
+
+    // Completion response (non-streaming)
+    record completion-response {
+        content: option<string>,
+        tool-calls: option<string>, // JSON array of tool calls
+        finish-reason: string,      // "stop", "tool_calls", "length", "error"
+        usage: option<usage-info>,
+    }
+
+    // Token usage info
+    record usage-info {
+        prompt-tokens: u32,
+        completion-tokens: u32,
+        total-tokens: u32,
+    }
+
+    // Streaming chunk
+    record stream-chunk {
+        delta-content: option<string>,
+        delta-tool-calls: option<string>,
+        finish-reason: option<string>,
+    }
+
+    // Get provider info
+    get-info: func() -> provider-info;
+
+    // List available models (reads from host config or discovers dynamically)
+    list-models: func() -> list<model-definition>;
+
+    // Check if provider is ready (credentials valid, endpoint reachable)
+    // Called by host to determine if provider can be used
+    is-ready: func() -> bool;
+
+    // Create a completion (non-streaming)
+    complete: func(req: completion-request) -> result<completion-response, plugin-error>;
+
+    // Create a streaming completion
+    // Returns a stream ID; use stream-next to get chunks
+    complete-stream: func(req: completion-request) -> result<string, plugin-error>;
+
+    // Get next chunk from stream (returns none when stream ends)
+    stream-next: func(stream-id: string) -> result<option<stream-chunk>, plugin-error>;
+
+    // Cancel a stream
+    stream-cancel: func(stream-id: string) -> result<_, plugin-error>;
+}
+
+// World definition for provider plugins
+world provider-plugin {
+    import host;
+    export manifest;
+    export provider;
+}
+
+// Full plugin world (supports all capabilities)
+world full-plugin {
+    import host;
+    export manifest;
+    export channel-meta;
+    export channel-adapter;
+    export tool;
+    export webhook;
+    export service;
+    export hooks;
+    export provider;
+}
