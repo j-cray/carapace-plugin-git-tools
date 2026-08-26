@@ -1,0 +1,11 @@
+# Direnv
+.direnv/
+
+# Nix build outputs
+result
+result-*
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak
