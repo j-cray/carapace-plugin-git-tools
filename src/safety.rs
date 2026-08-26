@@ -72,6 +72,21 @@ impl SafetyChecker {
         Ok(resolved)
     }
 
+    /// Check if target branch name is in the configured protected branches list
+    pub fn is_branch_protected(branch_name: &str, config: &PluginConfig) -> bool {
+        let normalized = branch_name
+            .trim()
+            .trim_start_matches("refs/heads/")
+            .trim_start_matches("heads/")
+            .trim_start_matches("refs/remotes/origin/")
+            .trim_start_matches("origin/");
+
+        config
+            .protected_branches
+            .iter()
+            .any(|b| b.trim().eq_ignore_ascii_case(normalized))
+    }
+
     /// Check if target branch is protected and whether the destructive action is allowed
     pub fn check_branch_protection(
         branch_name: &str,
@@ -86,12 +101,7 @@ impl SafetyChecker {
             .trim_start_matches("refs/remotes/origin/")
             .trim_start_matches("origin/");
 
-        let is_protected = config
-            .protected_branches
-            .iter()
-            .any(|b| b.trim().eq_ignore_ascii_case(normalized));
-
-        if is_protected {
+        if Self::is_branch_protected(branch_name, config) {
             if ctx.sandboxed {
                 return Err(format!(
                     "Security violation: protected branch '{}' cannot be modified in sandboxed agent mode.",

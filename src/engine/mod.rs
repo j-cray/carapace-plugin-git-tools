@@ -15,6 +15,7 @@ pub mod transport;
 use objects::{
     build_tree_hierarchy, compute_unified_diff, hash_and_write_object, parse_commit,
     read_loose_object, read_tree_all_files, scan_worktree_files, write_blob, write_commit_object,
+    ParsedCommit,
 };
 
 pub struct GitEngine<'a> {
@@ -152,6 +153,65 @@ impl<'a> GitEngine<'a> {
             }
         }
         None
+    }
+
+    fn remove_packed_ref(&self, ref_name: &str) -> Result<bool, String> {
+        let packed_refs = self.git_dir().join("packed-refs");
+        if !packed_refs.exists() {
+            return Ok(false);
+        }
+        let content = fs::read_to_string(&packed_refs)
+            .map_err(|e| format!("Failed to read packed-refs: {e}"))?;
+        let mut new_lines = Vec::new();
+        let mut found = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || trimmed.starts_with('^') {
+                new_lines.push(line.to_string());
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            if let (Some(_hash), Some(name)) = (parts.next(), parts.next()) {
+                if name == ref_name {
+                    found = true;
+                    continue;
+                }
+            }
+            new_lines.push(line.to_string());
+        }
+        if found {
+            fs::write(&packed_refs, new_lines.join("\n") + "\n")
+                .map_err(|e| format!("Failed to write packed-refs: {e}"))?;
+        }
+        Ok(found)
+    }
+
+    /// Check if ancestor_hash is an ancestor of descendant_hash in commit graph
+    pub fn is_ancestor(&self, ancestor_hash: &str, descendant_hash: &str) -> bool {
+        if ancestor_hash == descendant_hash {
+            return true;
+        }
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+        queue.push_back(descendant_hash.to_string());
+        visited.insert(descendant_hash.to_string());
+
+        while let Some(cid) = queue.pop_front() {
+            if cid == ancestor_hash {
+                return true;
+            }
+            if let Ok((_, cdata)) = read_loose_object(&self.git_dir(), &cid) {
+                if let Ok(p) = parse_commit(&cid, &cdata) {
+                    for parent in p.parents {
+                        if !visited.contains(&parent) {
+                            visited.insert(parent.clone());
+                            queue.push_back(parent);
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     // -----------------------------------------------------------------------
@@ -329,25 +389,63 @@ impl<'a> GitEngine<'a> {
         revision_range: Option<&str>,
     ) -> Result<GitToolResult, String> {
         let limit = max_count.unwrap_or(self.config.log_max_count);
-        let start_rev = match revision_range {
-            Some(r) if !r.trim().is_empty() => r.trim(),
-            _ => "HEAD",
-        };
+        let raw_range = revision_range.unwrap_or("HEAD").trim();
 
-        let start_hash = match self.rev_parse_hash(start_rev) {
-            Ok(h) => h,
-            Err(_) => {
-                return Ok(GitToolResult::ok(
-                    json!({ "commits": [], "total": 0 }),
-                    "No commits yet in this repository.",
-                ));
+        let mut excluded = HashSet::new();
+        let start_hash = if raw_range.contains("..") {
+            let mut parts = raw_range.split("..");
+            let left = parts.next().unwrap_or("").trim();
+            let right = parts.next().unwrap_or("").trim();
+
+            if !left.is_empty() {
+                if let Ok(left_hash) = self.rev_parse_hash(left) {
+                    let mut ex_queue = VecDeque::new();
+                    ex_queue.push_back(left_hash.clone());
+                    excluded.insert(left_hash);
+                    while let Some(cid) = ex_queue.pop_front() {
+                        if let Ok((_, content)) = read_loose_object(&self.git_dir(), &cid) {
+                            if let Ok(parsed) = parse_commit(&cid, &content) {
+                                for parent in parsed.parents {
+                                    if !excluded.contains(&parent) {
+                                        excluded.insert(parent.clone());
+                                        ex_queue.push_back(parent);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let right_rev = if right.is_empty() { "HEAD" } else { right };
+            match self.rev_parse_hash(right_rev) {
+                Ok(h) => h,
+                Err(_) => {
+                    return Ok(GitToolResult::ok(
+                        json!({ "commits": [], "total": 0 }),
+                        "No commits yet in this repository.",
+                    ));
+                }
+            }
+        } else {
+            let rev = if raw_range.is_empty() { "HEAD" } else { raw_range };
+            match self.rev_parse_hash(rev) {
+                Ok(h) => h,
+                Err(_) => {
+                    return Ok(GitToolResult::ok(
+                        json!({ "commits": [], "total": 0 }),
+                        "No commits yet in this repository.",
+                    ));
+                }
             }
         };
 
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
-        queue.push_back(start_hash.clone());
-        visited.insert(start_hash);
+        if !excluded.contains(&start_hash) {
+            queue.push_back(start_hash.clone());
+            visited.insert(start_hash);
+        }
 
         let mut commits = Vec::new();
 
@@ -383,7 +481,7 @@ impl<'a> GitEngine<'a> {
                     }
 
                     for parent in parsed.parents {
-                        if !visited.contains(&parent) {
+                        if !visited.contains(&parent) && !excluded.contains(&parent) {
                             visited.insert(parent.clone());
                             queue.push_back(parent);
                         }
@@ -503,20 +601,16 @@ impl<'a> GitEngine<'a> {
     /// Resolve revision to 40-char SHA1 hex
     pub fn rev_parse_hash(&self, revision: &str) -> Result<String, String> {
         let rev = revision.trim();
-
-        if rev == "HEAD" {
-            let (_, head_opt) = self.get_head()?;
-            return head_opt.ok_or_else(|| "HEAD does not point to a valid commit (empty repo)".to_string());
+        if rev.is_empty() {
+            return Err("Cannot rev-parse empty revision".to_string());
         }
 
-        // Check HEAD~N or HEAD^
-        if rev.starts_with("HEAD~") || rev == "HEAD^" {
-            let count: usize = if rev == "HEAD^" {
-                1
-            } else {
-                rev[5..].parse().unwrap_or(1)
-            };
-            let mut current = self.rev_parse_hash("HEAD")?;
+        // Handle ~ operator: e.g. HEAD~2, main~1, 847d031~1
+        if let Some(pos) = rev.find('~') {
+            let base = &rev[..pos];
+            let num_str = &rev[pos + 1..];
+            let count: usize = if num_str.is_empty() { 1 } else { num_str.parse().unwrap_or(1) };
+            let mut current = self.rev_parse_hash(base)?;
             for _ in 0..count {
                 let (_, content) = read_loose_object(&self.git_dir(), &current)?;
                 let parsed = parse_commit(&current, &content)?;
@@ -527,6 +621,28 @@ impl<'a> GitEngine<'a> {
                 }
             }
             return Ok(current);
+        }
+
+        // Handle ^ operator: e.g. HEAD^, HEAD^^
+        if rev.contains('^') {
+            let caret_count = rev.chars().filter(|&c| c == '^').count();
+            let base = rev.trim_end_matches('^');
+            let mut current = self.rev_parse_hash(base)?;
+            for _ in 0..caret_count {
+                let (_, content) = read_loose_object(&self.git_dir(), &current)?;
+                let parsed = parse_commit(&current, &content)?;
+                if let Some(parent) = parsed.parents.first() {
+                    current = parent.clone();
+                } else {
+                    return Err(format!("Cannot resolve '{rev}': history too shallow"));
+                }
+            }
+            return Ok(current);
+        }
+
+        if rev == "HEAD" {
+            let (_, head_opt) = self.get_head()?;
+            return head_opt.ok_or_else(|| "HEAD does not point to a valid commit (empty repo)".to_string());
         }
 
         // Check 40-character hex
@@ -551,33 +667,56 @@ impl<'a> GitEngine<'a> {
             }
         }
 
+        // Direct file lookup under .git/
+        let direct_ref_file = self.git_dir().join(rev);
+        if direct_ref_file.is_file() {
+            if let Ok(content) = fs::read_to_string(&direct_ref_file) {
+                let trimmed = content.trim();
+                if let Some(sym) = trimmed.strip_prefix("ref: ") {
+                    return self.rev_parse_hash(sym);
+                } else if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+
         // Check branch ref
         let branch_file = self.git_dir().join("refs").join("heads").join(rev);
-        if branch_file.exists() {
+        if branch_file.is_file() {
             if let Ok(content) = fs::read_to_string(&branch_file) {
-                return Ok(content.trim().to_string());
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
             }
         }
 
         // Check tag ref
         let tag_file = self.git_dir().join("refs").join("tags").join(rev);
-        if tag_file.exists() {
+        if tag_file.is_file() {
             if let Ok(content) = fs::read_to_string(&tag_file) {
-                return Ok(content.trim().to_string());
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
             }
         }
 
         // Check remote tracking ref
         let remote_file = self.git_dir().join("refs").join("remotes").join(rev);
-        if remote_file.exists() {
+        if remote_file.is_file() {
             if let Ok(content) = fs::read_to_string(&remote_file) {
-                return Ok(content.trim().to_string());
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
             }
         }
 
         // Check packed-refs
         if let Some(h) = self.find_packed_ref(&format!("refs/heads/{rev}"))
             .or_else(|| self.find_packed_ref(&format!("refs/tags/{rev}")))
+            .or_else(|| self.find_packed_ref(&format!("refs/remotes/{rev}")))
             .or_else(|| self.find_packed_ref(rev))
         {
             return Ok(h);
@@ -648,23 +787,29 @@ impl<'a> GitEngine<'a> {
             }
         }
 
+        // Pre-fetch commit blob contents once per history commit for performance
+        let mut commit_blobs: Vec<(ParsedCommit, String)> = Vec::new();
+        for commit in &history_commits {
+            if let Ok(files) = self.get_commit_tree_files(&commit.hash) {
+                if let Some((_, blob_sha)) = files.get(&norm_path) {
+                    if let Ok((_, bdata)) = read_loose_object(&self.git_dir(), blob_sha) {
+                        if let Ok(txt) = String::from_utf8(bdata) {
+                            commit_blobs.push((commit.clone(), txt));
+                        }
+                    }
+                }
+            }
+        }
+
         let mut annotated_lines = Vec::new();
 
         for (idx, line) in lines.iter().enumerate() {
             let mut matched_commit = None;
 
             // Search history commits from most recent to oldest
-            for commit in &history_commits {
-                if let Ok(files) = self.get_commit_tree_files(&commit.hash) {
-                    if let Some((_, blob_sha)) = files.get(&norm_path) {
-                        if let Ok((_, bdata)) = read_loose_object(&self.git_dir(), blob_sha) {
-                            if let Ok(txt) = String::from_utf8(bdata) {
-                                if txt.lines().any(|l| l == *line) {
-                                    matched_commit = Some(commit.clone());
-                                }
-                            }
-                        }
-                    }
+            for commit_blob in &commit_blobs {
+                if commit_blob.1.lines().any(|l| l == *line) {
+                    matched_commit = Some(commit_blob.0.clone());
                 }
             }
 
@@ -730,11 +875,27 @@ impl<'a> GitEngine<'a> {
         });
 
         if let Some(target_rev) = commit_ref {
-            // Diff against specific commit tree
-            let target_hash = self.rev_parse_hash(target_rev)?;
-            let target_files = self.get_commit_tree_files(&target_hash)?;
+            let (old_tree_files, new_tree_files, compare_with_worktree) = if target_rev.contains("..") {
+                let mut parts = target_rev.split("..");
+                let left = parts.next().unwrap_or("").trim();
+                let right = parts.next().unwrap_or("").trim();
+                let left_rev = if left.is_empty() { "HEAD" } else { left };
+                let right_rev = if right.is_empty() { "HEAD" } else { right };
 
-            let all_keys: HashSet<&String> = target_files.keys().chain(worktree_files.keys()).collect();
+                let left_hash = self.rev_parse_hash(left_rev)?;
+                let right_hash = self.rev_parse_hash(right_rev)?;
+                (self.get_commit_tree_files(&left_hash)?, Some(self.get_commit_tree_files(&right_hash)?), false)
+            } else {
+                let target_hash = self.rev_parse_hash(target_rev)?;
+                (self.get_commit_tree_files(&target_hash)?, None, true)
+            };
+
+            let all_keys: HashSet<&String> = if compare_with_worktree {
+                old_tree_files.keys().chain(worktree_files.keys()).collect()
+            } else {
+                let new_files = new_tree_files.as_ref().unwrap();
+                old_tree_files.keys().chain(new_files.keys()).collect()
+            };
             let mut sorted_keys: Vec<&String> = all_keys.into_iter().collect();
             sorted_keys.sort();
 
@@ -745,13 +906,17 @@ impl<'a> GitEngine<'a> {
                     }
                 }
 
-                let old_txt = target_files.get(key).and_then(|(_, sha)| {
+                let old_txt = old_tree_files.get(key).and_then(|(_, sha)| {
                     read_loose_object(&self.git_dir(), sha).ok().and_then(|(_, b)| String::from_utf8(b).ok())
                 });
 
-                let new_txt = worktree_files.get(key).and_then(|abs| {
-                    fs::read_to_string(abs).ok()
-                });
+                let new_txt = if compare_with_worktree {
+                    worktree_files.get(key).and_then(|abs| fs::read_to_string(abs).ok())
+                } else {
+                    new_tree_files.as_ref().unwrap().get(key).and_then(|(_, sha)| {
+                        read_loose_object(&self.git_dir(), sha).ok().and_then(|(_, b)| String::from_utf8(b).ok())
+                    })
+                };
 
                 let (file_diff, ins, del) = compute_unified_diff(key, old_txt.as_deref(), new_txt.as_deref());
                 if !file_diff.is_empty() {
@@ -906,6 +1071,14 @@ impl<'a> GitEngine<'a> {
         let mut added = Vec::new();
 
         if all {
+            // Stage deleted files that were in index
+            let index_keys: Vec<String> = index.keys().cloned().collect();
+            for k in index_keys {
+                if !worktree_files.contains_key(&k) {
+                    index.remove(&k);
+                    added.push(format!("deleted: {k}"));
+                }
+            }
             // Stage all files from worktree
             for (rel_path, abs_path) in worktree_files {
                 let bytes = fs::read(&abs_path).map_err(|e| format!("Failed to read '{rel_path}': {e}"))?;
@@ -1031,7 +1204,18 @@ impl<'a> GitEngine<'a> {
         }
 
         if reset_mode == "hard" {
-            // Check out all target files to working tree, clean untracked
+            let current_worktree = scan_worktree_files(&self.repo_path);
+            // Remove worktree files that do not exist in target_files
+            for rel_path in current_worktree.keys() {
+                if !target_files.contains_key(rel_path) {
+                    let full_path = self.repo_path.join(rel_path);
+                    if full_path.is_file() {
+                        let _ = fs::remove_file(full_path);
+                    }
+                }
+            }
+
+            // Check out all target files to working tree
             for (rel_path, (_, sha)) in &target_files {
                 let (_, content) = read_loose_object(&self.git_dir(), sha)?;
                 let full_path = self.repo_path.join(rel_path);
@@ -1343,8 +1527,17 @@ impl<'a> GitEngine<'a> {
             "delete" => {
                 let name = tag_name.ok_or_else(|| "tag_name is required to delete a tag".to_string())?;
                 let tag_file = tags_dir.join(name);
+                let mut deleted = false;
                 if tag_file.exists() {
                     fs::remove_file(&tag_file).map_err(|e| format!("Failed to delete tag ref: {e}"))?;
+                    deleted = true;
+                }
+                let packed_deleted = self.remove_packed_ref(&format!("refs/tags/{name}"))?;
+                if packed_deleted {
+                    deleted = true;
+                }
+                if !deleted {
+                    return Err(format!("Tag '{name}' not found."));
                 }
                 let summary = format!("Deleted tag '{name}'");
                 Ok(GitToolResult::ok(json!({ "deleted_tag": name }), summary))
@@ -1445,8 +1638,17 @@ impl<'a> GitEngine<'a> {
                 }
 
                 let branch_file = heads_dir.join(name);
+                let mut deleted = false;
                 if branch_file.exists() {
                     fs::remove_file(&branch_file).map_err(|e| format!("Failed to delete branch ref: {e}"))?;
+                    deleted = true;
+                }
+                let packed_deleted = self.remove_packed_ref(&format!("refs/heads/{name}"))?;
+                if packed_deleted {
+                    deleted = true;
+                }
+                if !deleted {
+                    return Err(format!("Branch '{name}' not found."));
                 }
                 let summary = format!("Deleted branch '{name}'");
                 Ok(GitToolResult::ok(json!({ "deleted_branch": name }), summary))
@@ -1549,7 +1751,7 @@ impl<'a> GitEngine<'a> {
         let (_, head_commit_opt) = self.get_head()?;
         let head_hash = head_commit_opt.ok_or_else(|| "Cannot merge into an empty repository".to_string())?;
 
-        if head_hash == source_hash {
+        if head_hash == source_hash || self.is_ancestor(&source_hash, &head_hash) {
             return Ok(GitToolResult::ok(
                 json!({
                     "source_ref": source_ref,
@@ -1561,6 +1763,43 @@ impl<'a> GitEngine<'a> {
 
         let source_files = self.get_commit_tree_files(&source_hash)?;
         let head_files = self.get_head_tree_files();
+
+        // Fast-forward merge check
+        if !no_ff && !squash && self.is_ancestor(&head_hash, &source_hash) {
+            // Remove files absent in source
+            for old_path in head_files.keys() {
+                if !source_files.contains_key(old_path) {
+                    let full_path = self.repo_path.join(old_path);
+                    if full_path.is_file() {
+                        let _ = fs::remove_file(full_path);
+                    }
+                }
+            }
+
+            // Checkout all source files
+            for (rel_path, (_, sha)) in &source_files {
+                let (_, content) = read_loose_object(&self.git_dir(), sha)?;
+                let full_path = self.repo_path.join(rel_path);
+                if let Some(p) = full_path.parent() {
+                    let _ = fs::create_dir_all(p);
+                }
+                fs::write(&full_path, content).map_err(|e| format!("Failed to write '{rel_path}': {e}"))?;
+            }
+
+            self.write_index(&source_files)?;
+            self.update_head_ref(&source_hash)?;
+
+            let summary = format!("Fast-forward merge of '{source_ref}' ({})", &source_hash[..7.min(source_hash.len())]);
+            return Ok(GitToolResult::ok(
+                json!({
+                    "source_ref": source_ref,
+                    "status": "Fast-forward",
+                    "merge_commit_hash": source_hash,
+                    "fast_forward": true
+                }),
+                summary,
+            ));
+        }
 
         // 3-way file merge
         let mut merged_files = head_files.clone();
@@ -1581,25 +1820,19 @@ impl<'a> GitEngine<'a> {
         let mut merge_commit_hash = None;
 
         if !squash {
-            if !no_ff && head_files.is_empty() {
-                // Fast-forward
-                self.update_head_ref(&source_hash)?;
-                merge_commit_hash = Some(source_hash.clone());
-            } else {
-                let now = Utc::now().timestamp();
-                let parents = vec![head_hash, source_hash];
-                let commit_id = write_commit_object(
-                    &self.git_dir(),
-                    &merged_tree,
-                    &parents,
-                    &self.config.author_name,
-                    &self.config.author_email,
-                    &merge_msg,
-                    now,
-                )?;
-                self.update_head_ref(&commit_id)?;
-                merge_commit_hash = Some(commit_id);
-            }
+            let now = Utc::now().timestamp();
+            let parents = vec![head_hash, source_hash];
+            let commit_id = write_commit_object(
+                &self.git_dir(),
+                &merged_tree,
+                &parents,
+                &self.config.author_name,
+                &self.config.author_email,
+                &merge_msg,
+                now,
+            )?;
+            self.update_head_ref(&commit_id)?;
+            merge_commit_hash = Some(commit_id);
         }
 
         let summary = format!("Merged '{source_ref}' into HEAD (no_ff: {no_ff}, squash: {squash})");
@@ -1716,6 +1949,9 @@ impl<'a> GitEngine<'a> {
 
                 self.write_stashes(&new_stashes)?;
 
+                // Reset index to clean HEAD tree
+                self.write_index(&head_files)?;
+
                 // Revert working tree to clean HEAD state
                 for (rel_path, abs_path) in &worktree_files {
                     if let Some((_, head_sha)) = head_files.get(rel_path) {
@@ -1723,6 +1959,18 @@ impl<'a> GitEngine<'a> {
                         fs::write(abs_path, bdata).map_err(|e| e.to_string())?;
                     } else if include_untracked {
                         let _ = fs::remove_file(abs_path);
+                    }
+                }
+
+                // Restore any head files that were deleted in worktree
+                for (rel_path, (_, head_sha)) in &head_files {
+                    let full_path = self.repo_path.join(rel_path);
+                    if !full_path.exists() {
+                        let (_, bdata) = read_loose_object(&self.git_dir(), head_sha)?;
+                        if let Some(p) = full_path.parent() {
+                            let _ = fs::create_dir_all(p);
+                        }
+                        let _ = fs::write(&full_path, bdata);
                     }
                 }
 

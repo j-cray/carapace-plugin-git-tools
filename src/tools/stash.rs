@@ -58,7 +58,8 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
         return GitToolResult::err(format!("Unknown stash tool: {name}"));
     }
 
-    let params: StashParams = match serde_json::from_str(params_json) {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
+    let params: StashParams = match serde_json::from_str(raw_json) {
         Ok(p) => p,
         Err(e) => return GitToolResult::err(format!("Invalid arguments for git_stash: {e}")),
     };

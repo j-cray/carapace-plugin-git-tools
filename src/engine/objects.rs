@@ -525,8 +525,80 @@ fn lcs_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<DiffOp<'a>> {
     result
 }
 
-/// Recursively collect all tracked and untracked worktree files
+/// Matcher for repository root .gitignore exclusion patterns
+#[derive(Debug, Clone, Default)]
+pub struct IgnoreMatcher {
+    patterns: Vec<String>,
+}
+
+impl IgnoreMatcher {
+    pub fn from_repo_root(work_dir: &Path) -> Self {
+        let mut patterns = vec![".git".to_string()];
+        let gitignore_path = work_dir.join(".gitignore");
+        if gitignore_path.is_file() {
+            if let Ok(content) = fs::read_to_string(&gitignore_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        patterns.push(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        Self { patterns }
+    }
+
+    pub fn is_ignored(&self, rel_path: &str, is_dir: bool) -> bool {
+        let norm = rel_path.trim_start_matches('/').replace('\\', "/");
+        if norm == ".git" || norm.starts_with(".git/") {
+            return true;
+        }
+
+        let file_name = norm.rsplit('/').next().unwrap_or(&norm);
+
+        for pat in &self.patterns {
+            let pat_trimmed = pat.trim();
+            if pat_trimmed == ".git" {
+                continue;
+            }
+
+            let is_dir_only = pat_trimmed.ends_with('/');
+            let clean_pat = pat_trimmed.trim_end_matches('/').trim_start_matches('/');
+
+            if is_dir_only && !is_dir {
+                continue;
+            }
+
+            // Exact match on full relative path or filename or parent directory prefix
+            if norm == clean_pat
+                || file_name == clean_pat
+                || norm.starts_with(&format!("{clean_pat}/"))
+                || norm.contains(&format!("/{clean_pat}/"))
+            {
+                return true;
+            }
+
+            // Wildcard matching: *.ext or prefix*
+            if clean_pat.starts_with('*') && clean_pat.len() > 1 {
+                let suffix = &clean_pat[1..];
+                if file_name.ends_with(suffix) || norm.ends_with(suffix) {
+                    return true;
+                }
+            } else if clean_pat.ends_with('*') && clean_pat.len() > 1 {
+                let prefix = &clean_pat[..clean_pat.len() - 1];
+                if file_name.starts_with(prefix) || norm.starts_with(prefix) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+/// Recursively collect all tracked and untracked worktree files honoring .gitignore
 pub fn scan_worktree_files(work_dir: &Path) -> BTreeMap<String, PathBuf> {
+    let matcher = IgnoreMatcher::from_repo_root(work_dir);
     let mut files = BTreeMap::new();
     let mut stack = vec![work_dir.to_path_buf()];
 
@@ -540,13 +612,20 @@ pub fn scan_worktree_files(work_dir: &Path) -> BTreeMap<String, PathBuf> {
                     continue;
                 }
 
-                if path.is_dir() {
+                let rel_path = match path.strip_prefix(work_dir) {
+                    Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                    Err(_) => continue,
+                };
+
+                let is_dir = path.is_dir();
+                if matcher.is_ignored(&rel_path, is_dir) {
+                    continue;
+                }
+
+                if is_dir {
                     stack.push(path);
                 } else if path.is_file() {
-                    if let Ok(rel) = path.strip_prefix(work_dir) {
-                        let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        files.insert(rel_str, path);
-                    }
+                    files.insert(rel_path, path);
                 }
             }
         }

@@ -192,9 +192,10 @@ struct RevParseParams {
 }
 
 pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolContext) -> GitToolResult {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
     match name {
         "git_status" => {
-            let params: StatusParams = match serde_json::from_str(params_json) {
+            let params: StatusParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_status: {e}")),
             };
@@ -206,7 +207,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
             engine.status().unwrap_or_else(GitToolResult::err)
         }
         "git_diff" => {
-            let params: DiffParams = match serde_json::from_str(params_json) {
+            let params: DiffParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_diff: {e}")),
             };
@@ -225,7 +226,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_log" => {
-            let params: LogParams = match serde_json::from_str(params_json) {
+            let params: LogParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_log: {e}")),
             };
@@ -243,7 +244,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_show" => {
-            let params: ShowParams = match serde_json::from_str(params_json) {
+            let params: ShowParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_show: {e}")),
             };
@@ -255,7 +256,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
             engine.show(params.revision.as_deref()).unwrap_or_else(GitToolResult::err)
         }
         "git_blame" => {
-            let params: BlameParams = match serde_json::from_str(params_json) {
+            let params: BlameParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_blame: {e}")),
             };
@@ -267,7 +268,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, _ctx: &ToolC
             engine.blame(&params.file_path).unwrap_or_else(GitToolResult::err)
         }
         "git_rev_parse" => {
-            let params: RevParseParams = match serde_json::from_str(params_json) {
+            let params: RevParseParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_rev_parse: {e}")),
             };

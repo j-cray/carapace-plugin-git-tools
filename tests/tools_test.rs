@@ -454,4 +454,140 @@ fn test_dispatch_integration() {
     // Test unknown tool dispatch
     let res_unknown = tools::dispatch("git_nonexistent", "{}", &config, &ctx);
     assert!(!res_unknown.success);
+
+    // Test dispatch with empty parameters string
+    let res_empty_param = tools::dispatch("git_status", "", &config, &ctx);
+    assert!(res_empty_param.success);
+}
+
+#[test]
+fn test_revision_ranges_and_add_deletions_and_reset_hard() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        default_repo_path: repo_path.display().to_string(),
+        author_name: "Test Agent".to_string(),
+        author_email: "agent@test.com".to_string(),
+        ..Default::default()
+    };
+    let ctx = ToolContext {
+        agent_id: Some("agent-1".to_string()),
+        session_key: Some("test-session".to_string()),
+        message_channel: None,
+        sandboxed: false,
+    };
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Commit 1: create file1.txt and file2.txt
+    fs::write(repo_path.join("file1.txt"), "line 1\n").unwrap();
+    fs::write(repo_path.join("file2.txt"), "hello\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("commit 1", false).unwrap();
+
+    // Commit 2: update file1.txt, add file3.txt
+    fs::write(repo_path.join("file1.txt"), "line 1\nline 2\n").unwrap();
+    fs::write(repo_path.join("file3.txt"), "third file\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("commit 2", false).unwrap();
+
+    // Commit 3: update file3.txt
+    fs::write(repo_path.join("file3.txt"), "third file modified\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("commit 3", false).unwrap();
+
+    // Test git_log with revision range HEAD~1..HEAD (should only show commit 3)
+    let log_range = engine.log(None, None, Some("HEAD~1..HEAD")).unwrap();
+    assert_eq!(log_range.data["total"].as_u64().unwrap(), 1);
+    assert_eq!(log_range.data["commits"][0]["summary"].as_str().unwrap(), "commit 3");
+
+    // Test git_log with revision range HEAD~2..HEAD (should show commit 3 and commit 2)
+    let log_range2 = engine.log(None, None, Some("HEAD~2..HEAD")).unwrap();
+    assert_eq!(log_range2.data["total"].as_u64().unwrap(), 2);
+
+    // Test git_diff with commit revision range HEAD~1..HEAD
+    let diff_range = engine.diff(false, Some("HEAD~1..HEAD"), None, None).unwrap();
+    assert_eq!(diff_range.data["files_changed"].as_u64().unwrap(), 1);
+    assert!(diff_range.data["diff"].as_str().unwrap().contains("file3.txt"));
+
+    // Test git_add with deleted file
+    fs::remove_file(repo_path.join("file2.txt")).unwrap();
+    let add_del = engine.add(None, true).unwrap();
+    let staged_paths = add_del.data["staged_paths"].as_array().unwrap();
+    assert!(staged_paths.iter().any(|p| p.as_str() == Some("deleted: file2.txt")));
+
+    // Commit deletion
+    engine.commit("commit 4: remove file2", false).unwrap();
+
+    // Test reset --hard clean up of extra untracked files
+    fs::write(repo_path.join("untracked_extra.txt"), "should be deleted").unwrap();
+    let reset_res = engine.reset(None, Some("hard"), Some("HEAD~1")).unwrap();
+    assert!(reset_res.success);
+    assert!(!repo_path.join("untracked_extra.txt").exists(), "reset --hard should remove untracked working-tree file");
+    assert!(repo_path.join("file2.txt").exists(), "file2.txt should be restored after resetting to HEAD~1");
+
+    // Test branch rename protection
+    let rename_protected = tools::dispatch("git_branch", r#"{"action": "rename", "branch_name": "main", "new_name": "renamed_main"}"#, &config, &ctx);
+    assert!(!rename_protected.success, "Renaming protected branch without force should fail");
+}
+
+#[test]
+fn test_stash_cleanliness_and_packed_refs() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        default_repo_path: repo_path.display().to_string(),
+        author_name: "Stash Agent".to_string(),
+        author_email: "stash@agent.ai".to_string(),
+        ..Default::default()
+    };
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    fs::write(repo_path.join("clean.txt"), "clean base\n").unwrap();
+    engine.add(None, true).unwrap();
+    engine.commit("base commit", false).unwrap();
+
+    // Dirty worktree and dirty staged index
+    fs::write(repo_path.join("clean.txt"), "dirty modification\n").unwrap();
+    fs::write(repo_path.join("dirty_new.txt"), "dirty new file\n").unwrap();
+    engine.add(Some(vec!["clean.txt".to_string()]), false).unwrap();
+
+    // Stash save with include_untracked: true
+    let stash_save = engine.stash("save", Some("WIP stash"), None, true).unwrap();
+    assert!(stash_save.success);
+
+    // Verify working tree is restored to clean base state
+    let content_after = fs::read_to_string(repo_path.join("clean.txt")).unwrap();
+    assert_eq!(content_after, "clean base\n");
+    assert!(!repo_path.join("dirty_new.txt").exists());
+
+    // Verify status is completely clean
+    let status = engine.status().unwrap();
+    assert!(status.data["clean"].as_bool().unwrap(), "Status must be clean after stash save");
+
+    // Stash pop
+    let stash_pop = engine.stash("pop", None, Some(0), false).unwrap();
+    assert!(stash_pop.success);
+    let content_popped = fs::read_to_string(repo_path.join("clean.txt")).unwrap();
+    assert_eq!(content_popped, "dirty modification\n");
+
+    // Test packed-refs deletion and rev-parse
+    let packed_refs_file = repo_path.join(".git").join("packed-refs");
+    let commit_hash = engine.rev_parse_hash("HEAD").unwrap();
+    fs::write(&packed_refs_file, format!("# packed-refs with: peeled fully-peeled sorted\n{commit_hash} refs/tags/v1.0.0-packed\n{commit_hash} refs/heads/packed-feature\n")).unwrap();
+
+    // Verify rev-parse finds packed tag and branch
+    assert_eq!(engine.rev_parse_hash("v1.0.0-packed").unwrap(), commit_hash);
+    assert_eq!(engine.rev_parse_hash("packed-feature").unwrap(), commit_hash);
+
+    // Delete packed tag
+    let del_tag = engine.tag("delete", Some("v1.0.0-packed"), None, None).unwrap();
+    assert!(del_tag.success);
+    assert!(engine.rev_parse_hash("v1.0.0-packed").is_err());
+
+    // Delete packed branch
+    let del_branch = engine.branch("delete", Some("packed-feature"), None, None, false).unwrap();
+    assert!(del_branch.success);
+    assert!(engine.rev_parse_hash("packed-feature").is_err());
 }

@@ -211,9 +211,10 @@ struct PushParams {
 }
 
 pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
     match name {
         "git_remote" => {
-            let params: RemoteParams = match serde_json::from_str(params_json) {
+            let params: RemoteParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_remote: {e}")),
             };
@@ -231,7 +232,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_clone" => {
-            let params: CloneParams = match serde_json::from_str(params_json) {
+            let params: CloneParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_clone: {e}")),
             };
@@ -250,7 +251,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_fetch" => {
-            let params: FetchParams = match serde_json::from_str(params_json) {
+            let params: FetchParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_fetch: {e}")),
             };
@@ -269,7 +270,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_pull" => {
-            let params: PullParams = match serde_json::from_str(params_json) {
+            let params: PullParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_pull: {e}")),
             };
@@ -287,7 +288,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_push" => {
-            let params: PushParams = match serde_json::from_str(params_json) {
+            let params: PushParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_push: {e}")),
             };

@@ -152,9 +152,10 @@ struct CleanParams {
 }
 
 pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
     match name {
         "git_add" => {
-            let params: AddParams = match serde_json::from_str(params_json) {
+            let params: AddParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_add: {e}")),
             };
@@ -166,7 +167,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
             engine.add(params.paths, params.all.unwrap_or(false)).unwrap_or_else(GitToolResult::err)
         }
         "git_restore" => {
-            let params: RestoreParams = match serde_json::from_str(params_json) {
+            let params: RestoreParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_restore: {e}")),
             };
@@ -178,7 +179,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
             engine.restore(params.paths, params.staged.unwrap_or(false)).unwrap_or_else(GitToolResult::err)
         }
         "git_reset" => {
-            let params: ResetParams = match serde_json::from_str(params_json) {
+            let params: ResetParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_reset: {e}")),
             };
@@ -198,7 +199,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
             engine.reset(params.paths, params.mode.as_deref(), params.target_ref.as_deref()).unwrap_or_else(GitToolResult::err)
         }
         "git_clean" => {
-            let params: CleanParams = match serde_json::from_str(params_json) {
+            let params: CleanParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_clean: {e}")),
             };

@@ -120,9 +120,10 @@ struct TagParams {
 }
 
 pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
     match name {
         "git_commit" => {
-            let params: CommitParams = match serde_json::from_str(params_json) {
+            let params: CommitParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_commit: {e}")),
             };
@@ -136,7 +137,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_revert" => {
-            let params: RevertParams = match serde_json::from_str(params_json) {
+            let params: RevertParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_revert: {e}")),
             };
@@ -150,7 +151,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_tag" => {
-            let params: TagParams = match serde_json::from_str(params_json) {
+            let params: TagParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_tag: {e}")),
             };

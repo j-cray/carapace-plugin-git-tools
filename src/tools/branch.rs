@@ -140,9 +140,10 @@ struct MergeParams {
 }
 
 pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolContext) -> GitToolResult {
+    let raw_json = if params_json.trim().is_empty() { "{}" } else { params_json };
     match name {
         "git_branch" => {
-            let params: BranchParams = match serde_json::from_str(params_json) {
+            let params: BranchParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_branch: {e}")),
             };
@@ -161,6 +162,25 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                         return GitToolResult::err(e);
                     }
                 }
+            } else if params.action == "rename" {
+                if let Some(ref b) = params.branch_name {
+                    if SafetyChecker::is_branch_protected(b, config) {
+                        if let Err(e) = SafetyChecker::verify_destructive_allowed("git_branch (rename protected branch)", ctx) {
+                            return GitToolResult::err(e);
+                        }
+                        if !force {
+                            return GitToolResult::err(format!("Branch '{b}' is protected. Renaming requires force: true."));
+                        }
+                    }
+                }
+            } else if params.action == "create" && force {
+                if let Some(ref b) = params.branch_name {
+                    if SafetyChecker::is_branch_protected(b, config) {
+                        if let Err(e) = SafetyChecker::verify_destructive_allowed("git_branch (force overwrite protected branch)", ctx) {
+                            return GitToolResult::err(e);
+                        }
+                    }
+                }
             }
 
             let engine = GitEngine::new(path, config);
@@ -175,7 +195,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_checkout" => {
-            let params: CheckoutParams = match serde_json::from_str(params_json) {
+            let params: CheckoutParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_checkout: {e}")),
             };
@@ -193,7 +213,7 @@ pub fn handle(name: &str, params_json: &str, config: &PluginConfig, ctx: &ToolCo
                 .unwrap_or_else(GitToolResult::err)
         }
         "git_merge" => {
-            let params: MergeParams = match serde_json::from_str(params_json) {
+            let params: MergeParams = match serde_json::from_str(raw_json) {
                 Ok(p) => p,
                 Err(e) => return GitToolResult::err(format!("Invalid arguments for git_merge: {e}")),
             };

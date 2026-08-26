@@ -340,6 +340,15 @@ impl<'a> RemoteTransport<'a> {
         let branch_name = branch.unwrap_or("main");
 
         let fetch_res = self.fetch(Some(remote_name), Some(branch_name), false, false)?;
+        let tracking_ref = format!("{remote_name}/{branch_name}");
+        let engine = crate::engine::GitEngine::new(self.repo_path.clone(), self.config);
+
+        let merge_res = if engine.rev_parse_hash(&tracking_ref).is_ok() {
+            Some(engine.merge(&tracking_ref, None, false, false)?)
+        } else {
+            None
+        };
+
         let summary = format!("Pulled from {remote_name}/{branch_name} (rebase: {rebase})");
 
         Ok(GitToolResult::ok(
@@ -347,7 +356,8 @@ impl<'a> RemoteTransport<'a> {
                 "remote": remote_name,
                 "branch": branch_name,
                 "rebase": rebase,
-                "fetch_details": fetch_res.data
+                "fetch_details": fetch_res.data,
+                "merge_details": merge_res.map(|r| r.data)
             }),
             summary,
         ))
