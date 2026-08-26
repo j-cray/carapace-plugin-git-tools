@@ -99,7 +99,7 @@ This repository includes a Nix Flake development shell providing all required to
 or:
 ```bash
 cargo component build --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/git_tools.wasm target/wasm32-unknown-unknown/release/git-tools.wasm
+mv target/wasm32-unknown-unknown/release/git_tools.wasm target/wasm32-unknown-unknown/release/git-tools.wasm
 ```
 The compiled component will be located at:
 `target/wasm32-unknown-unknown/release/git-tools.wasm`

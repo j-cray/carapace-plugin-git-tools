@@ -83,7 +83,7 @@ This project is **`carapace-plugin-git-tools`**, a comprehensive Git tools plugi
   or compile directly:
   ```bash
   cargo component build --release --target wasm32-unknown-unknown
-  cp target/wasm32-unknown-unknown/release/git_tools.wasm target/wasm32-unknown-unknown/release/git-tools.wasm
+  mv target/wasm32-unknown-unknown/release/git_tools.wasm target/wasm32-unknown-unknown/release/git-tools.wasm
   ```
 
 ### Inspecting Component Interface
