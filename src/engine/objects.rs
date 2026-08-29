@@ -45,8 +45,9 @@ pub fn hash_and_write_object(git_dir: &Path, obj_type: &str, data: &[u8]) -> Res
 
 /// Read loose object from .git/objects/xx/yyy...
 pub fn read_loose_object(git_dir: &Path, hex: &str) -> Result<(String, Vec<u8>), String> {
-    if hex.len() < 40 {
-        return Err(format!("Invalid object hash: {hex}"));
+    let hex = hex.trim();
+    if hex.len() != 40 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("Invalid 40-character SHA1 object hash: '{hex}'"));
     }
     let prefix = &hex[0..2];
     let suffix = &hex[2..];
@@ -146,6 +147,7 @@ pub fn write_tree(git_dir: &Path, mut entries: Vec<(u32, String, String)>) -> Re
 }
 
 fn decode_hex_sha1(hex: &str) -> Result<[u8; 20], String> {
+    let hex = hex.trim();
     if hex.len() != 40 {
         return Err(format!("Expected 40-char SHA1 hex, got length {}", hex.len()));
     }
@@ -187,7 +189,7 @@ pub fn build_tree_hierarchy(
                 match entry {
                     Node::Dir(ref mut sub) => current_dir = sub,
                     Node::File(_, _) => {
-                        return Err(format!("Path conflict at '{}' in tree building", part));
+                        return Err(format!("Path conflict at '{part}' in tree building"));
                     }
                 }
             }
@@ -498,8 +500,7 @@ fn lcs_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<DiffOp<'a>> {
             if old[i] == new[j] {
                 dp[i + 1][j + 1] = dp[i][j] + 1;
             } else {
-                dp[i + 1][j + 1] = dp[i][j] + 1;
-                dp[i + 1][j + 1] = dp[i][j].max(dp[i][j + 1]);
+                dp[i + 1][j + 1] = dp[i + 1][j].max(dp[i][j + 1]);
             }
         }
     }

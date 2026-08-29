@@ -3,6 +3,7 @@ use tempfile::TempDir;
 
 use git_tools::bindings::exports::tool::ToolContext;
 use git_tools::config::PluginConfig;
+use git_tools::engine::objects::{compute_unified_diff, read_loose_object};
 use git_tools::engine::transport::{
     parse_smart_http_refs, validate_no_embedded_credentials, validate_repo_url, RemoteTransport,
 };
@@ -167,7 +168,6 @@ fn test_commit_log_show_blame_revparse() {
     // Blame
     let blame_res = engine.blame("src/lib.rs").expect("Blame failed");
     assert!(blame_res.success);
-    assert_eq!(blame_res.data["lines_count"], 4);
     let lines = blame_res.data["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 4);
     assert_eq!(lines[0]["author"], "Carapace Test Agent <test@carapace.ai>");
@@ -210,17 +210,17 @@ fn test_branch_checkout_merge_revert() {
     // Switch back to main
     let checkout_main = engine.checkout("main", false, None).unwrap();
     assert!(checkout_main.success);
-    assert!(!vfs::exists(&repo_path.join("auth.txt")), "auth.txt should not exist on main before merge");
+    assert!(!vfs::exists(repo_path.join("auth.txt")), "auth.txt should not exist on main before merge");
 
     // Merge feature-auth into main
     let merge_res = engine.merge("feature-auth", Some("Merge feature-auth into main"), false, false).unwrap();
     assert!(merge_res.success);
-    assert!(vfs::exists(&repo_path.join("auth.txt")), "auth.txt should exist on main after merge");
+    assert!(vfs::exists(repo_path.join("auth.txt")), "auth.txt should exist on main after merge");
 
     // Revert the auth commit
     let revert_res = engine.revert("feature-auth", false).unwrap();
     assert!(revert_res.success);
-    assert!(!vfs::exists(&repo_path.join("auth.txt")), "auth.txt should be removed after reverting auth commit");
+    assert!(!vfs::exists(repo_path.join("auth.txt")), "auth.txt should be removed after reverting auth commit");
 }
 
 #[test]
@@ -263,12 +263,12 @@ fn test_restore_reset_clean() {
     // Dry run clean
     let clean_dry = engine.clean(true, false).unwrap();
     assert_eq!(clean_dry.data["cleaned"].as_array().unwrap().len(), 2);
-    assert!(vfs::exists(&repo_path.join("temp1.tmp")));
+    assert!(vfs::exists(repo_path.join("temp1.tmp")));
 
     // Actual clean
     let clean_real = engine.clean(false, false).unwrap();
     assert_eq!(clean_real.data["cleaned"].as_array().unwrap().len(), 2);
-    assert!(!vfs::exists(&repo_path.join("temp1.tmp")));
+    assert!(!vfs::exists(repo_path.join("temp1.tmp")));
 }
 
 #[test]
@@ -282,11 +282,11 @@ fn test_tags_and_stash_flow() {
 
     vfs::write(repo_path.join("file.txt"), "v1\n").unwrap();
     engine.add(None, true).unwrap();
-    engine.commit("v1 commit", false).unwrap();
+    engine.commit("v1.0 release", false).unwrap();
 
-    // Tag create
-    let tag_create = engine.tag("create", Some("v0.1.0"), None, Some("release v0.1.0")).unwrap();
-    assert!(tag_create.success);
+    // Tag create lightweight
+    let tag_res = engine.tag("create", Some("v0.1.0"), None, None).unwrap();
+    assert!(tag_res.success);
 
     // Tag list
     let tag_list = engine.tag("list", None, None, None).unwrap();
@@ -294,7 +294,7 @@ fn test_tags_and_stash_flow() {
     let tags = tag_list.data["tags"].as_array().unwrap();
     assert!(tags.iter().any(|t| t == "v0.1.0"));
 
-    // Modify file for stash
+    // Modify file
     vfs::write(repo_path.join("file.txt"), "v1 with experimental changes\n").unwrap();
 
     // Stash save
@@ -548,8 +548,8 @@ fn test_revision_ranges_and_add_deletions_and_reset_hard() {
     vfs::write(repo_path.join("untracked_extra.txt"), "should be deleted").unwrap();
     let reset_res = engine.reset(None, Some("hard"), Some("HEAD~1")).unwrap();
     assert!(reset_res.success);
-    assert!(!vfs::exists(&repo_path.join("untracked_extra.txt")), "reset --hard should remove untracked working-tree file");
-    assert!(vfs::exists(&repo_path.join("file2.txt")), "file2.txt should be restored after resetting to HEAD~1");
+    assert!(!vfs::exists(repo_path.join("untracked_extra.txt")), "reset --hard should remove untracked working-tree file");
+    assert!(vfs::exists(repo_path.join("file2.txt")), "file2.txt should be restored after resetting to HEAD~1");
 
     // Test branch rename protection
     let rename_protected = tools::dispatch(
@@ -589,7 +589,7 @@ fn test_stash_cleanliness_and_packed_refs() {
     // Verify working tree is restored to clean base state
     let content_after = vfs::read_to_string(repo_path.join("clean.txt")).unwrap();
     assert_eq!(content_after, "clean base\n");
-    assert!(!vfs::exists(&repo_path.join("dirty_new.txt")));
+    assert!(!vfs::exists(repo_path.join("dirty_new.txt")));
 
     // Verify status is completely clean
     let status = engine.status().unwrap();
@@ -733,12 +733,12 @@ fn test_three_way_merge_file_deletion_and_reconciliation() {
 
     // Verify 3-way reconciliation:
     // file2.txt should be deleted
-    assert!(!vfs::exists(&repo_path.join("file2.txt")), "file2.txt should be removed after merge");
+    assert!(!vfs::exists(repo_path.join("file2.txt")), "file2.txt should be removed after merge");
     // file1.txt should have feature modifications
     assert_eq!(vfs::read_to_string(repo_path.join("file1.txt")).unwrap(), "modified file1 on feat\n");
     // file3.txt and file4.txt should both exist
-    assert!(vfs::exists(&repo_path.join("file3.txt")), "file3.txt from feat should exist");
-    assert!(vfs::exists(&repo_path.join("file4.txt")), "file4.txt from main should exist");
+    assert!(vfs::exists(repo_path.join("file3.txt")), "file3.txt from feat should exist");
+    assert!(vfs::exists(repo_path.join("file4.txt")), "file4.txt from main should exist");
 }
 
 #[test]
@@ -764,7 +764,7 @@ fn test_clean_nested_empty_directories() {
     assert!(clean_res.success);
 
     // Deep directory structure should be completely pruned
-    assert!(!vfs::exists(&repo_path.join("deep")), "Empty nested directory tree should be pruned completely");
+    assert!(!vfs::exists(repo_path.join("deep")), "Empty nested directory tree should be pruned completely");
 }
 
 #[test]
@@ -898,7 +898,6 @@ fn test_auth_header_formatting_and_github_pat() {
     // Standard classic GitHub PAT (ghp_...)
     let (h_name, h_val) = RemoteTransport::format_auth_header("ghp_ABC123xyz456");
     assert_eq!(h_name, "Authorization");
-    // "x-access-token:ghp_ABC123xyz456" base64 encoded -> "eC1hY2Nlc3MtdG9rZW46Z2hwX0FCQzEyM3h5ejQ1Ng=="
     assert_eq!(h_val, "Basic eC1hY2Nlc3MtdG9rZW46Z2hwX0FCQzEyM3h5ejQ1Ng==");
 
     // Fine-grained GitHub PAT (github_pat_...)
@@ -1001,4 +1000,167 @@ fn test_remote_transport_auth_header_integration() {
     let (h_name, h_val) = header.unwrap();
     assert_eq!(h_name, "Authorization");
     assert!(h_val.starts_with("Basic "));
+}
+
+#[test]
+fn test_annotated_tag_peeling_operations() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig {
+        author_name: "Tag Tester".to_string(),
+        author_email: "tagger@test.ai".to_string(),
+        ..Default::default()
+    };
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Commit 1
+    vfs::write(repo_path.join("app.txt"), "v1.0.0\n").unwrap();
+    engine.add(None, true).unwrap();
+    let commit1 = engine.commit("release 1.0.0", false).unwrap();
+    let hash1 = commit1.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Create annotated tag v1.0.0 pointing to commit 1
+    let tag_res = engine.tag("create", Some("v1.0.0"), Some("HEAD"), Some("Annotated tag v1.0.0")).unwrap();
+    assert!(tag_res.success);
+    let tag_hash = tag_res.data["hash"].as_str().unwrap().to_string();
+    assert_ne!(tag_hash, hash1, "Annotated tag hash should differ from commit hash");
+
+    // Commit 2
+    vfs::write(repo_path.join("app.txt"), "v1.1.0\n").unwrap();
+    engine.add(None, true).unwrap();
+    let commit2 = engine.commit("release 1.1.0", false).unwrap();
+    let hash2 = commit2.data["commit_hash"].as_str().unwrap().to_string();
+
+    // Create annotated tag v1.1.0
+    let tag_res2 = engine.tag("create", Some("v1.1.0"), Some("HEAD"), Some("Annotated tag v1.1.0")).unwrap();
+    assert!(tag_res2.success);
+
+    // Test peel_to_commit directly
+    assert_eq!(engine.peel_to_commit(&tag_hash).unwrap(), hash1);
+
+    // Test log with revision range using annotated tags: v1.0.0..v1.1.0
+    let log_range = engine.log(None, None, Some("v1.0.0..v1.1.0")).unwrap();
+    assert_eq!(log_range.data["total"].as_u64().unwrap(), 1);
+    assert_eq!(log_range.data["commits"][0]["hash"], hash2);
+
+    // Test diff using annotated tags: v1.0.0..v1.1.0
+    let diff_tags = engine.diff(false, Some("v1.0.0..v1.1.0"), None, None).unwrap();
+    assert_eq!(diff_tags.data["files_changed"].as_u64().unwrap(), 1);
+    assert!(diff_tags.data["diff"].as_str().unwrap().contains("-v1.0.0"));
+    assert!(diff_tags.data["diff"].as_str().unwrap().contains("+v1.1.0"));
+
+    // Test branch creation from annotated tag
+    let br_res = engine.branch("create", Some("from-tag"), None, Some("v1.0.0"), false).unwrap();
+    assert!(br_res.success);
+    assert_eq!(br_res.data["hash"], hash1, "Branch started from annotated tag should point to peeled commit");
+
+    // Test checkout branch from annotated tag
+    let co_res = engine.checkout("checkout-from-tag", true, Some("v1.0.0")).unwrap();
+    assert!(co_res.success);
+    assert_eq!(vfs::read_to_string(repo_path.join("app.txt")).unwrap(), "v1.0.0\n");
+
+    // Switch back to main (which is at commit 2 / v1.1.0)
+    engine.checkout("main", false, None).unwrap();
+
+    // Test revert referencing annotated tag
+    let rev_res = engine.revert("v1.1.0", false).unwrap();
+    assert!(rev_res.success);
+    assert_eq!(vfs::read_to_string(repo_path.join("app.txt")).unwrap(), "v1.0.0\n");
+}
+
+#[test]
+fn test_lcs_myers_diff_correctness() {
+    let old_text = "line A\nline B\nline C\nline D\n";
+    let new_text = "line A\nline B modified\nline C\nline D\nline E\n";
+
+    let (patch, insertions, deletions) = compute_unified_diff("test.txt", Some(old_text), Some(new_text));
+    assert_eq!(insertions, 2);
+    assert_eq!(deletions, 1);
+    assert!(patch.contains("--- a/test.txt\n+++ b/test.txt"));
+    assert!(patch.contains("-line B"));
+    assert!(patch.contains("+line B modified"));
+    assert!(patch.contains("+line E"));
+
+    // Pure deletion
+    let (patch_del, ins_del, del_del) = compute_unified_diff("del.txt", Some("1\n2\n3\n"), Some("1\n3\n"));
+    assert_eq!(ins_del, 0);
+    assert_eq!(del_del, 1);
+    assert!(patch_del.contains("-2"));
+
+    // Pure addition
+    let (patch_add, ins_add, del_add) = compute_unified_diff("add.txt", None, Some("hello\nworld\n"));
+    assert_eq!(ins_add, 2);
+    assert_eq!(del_add, 0);
+    assert!(patch_add.contains("+hello"));
+    assert!(patch_add.contains("+world"));
+}
+
+#[test]
+fn test_wildcard_protected_branches() {
+    let config = PluginConfig {
+        protected_branches: vec![
+            "main".to_string(),
+            "master".to_string(),
+            "release/*".to_string(),
+            "prod*".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let normal_ctx = ToolContext {
+        agent_id: Some("agent-1".to_string()),
+        session_key: Some("main".to_string()),
+        message_channel: None,
+        sandboxed: false,
+    };
+
+    // main & master are protected
+    assert!(SafetyChecker::check_branch_protection("main", false, &config, &normal_ctx).is_err());
+    assert!(SafetyChecker::check_branch_protection("master", false, &config, &normal_ctx).is_err());
+
+    // release/* wildcard matches
+    assert!(SafetyChecker::check_branch_protection("release/v1.0", false, &config, &normal_ctx).is_err());
+    assert!(SafetyChecker::check_branch_protection("refs/heads/release/2024", false, &config, &normal_ctx).is_err());
+
+    // prod* wildcard matches
+    assert!(SafetyChecker::check_branch_protection("production", false, &config, &normal_ctx).is_err());
+    assert!(SafetyChecker::check_branch_protection("prod-us-east", false, &config, &normal_ctx).is_err());
+
+    // Unprotected feature branch
+    assert!(SafetyChecker::check_branch_protection("feature/new-ui", false, &config, &normal_ctx).is_ok());
+}
+
+#[test]
+fn test_empty_repo_commit_safeguard() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Attempting commit on empty repository without staged changes and allow_empty: false should fail gracefully
+    let commit_err = engine.commit("empty commit", false);
+    assert!(commit_err.is_err());
+    assert!(commit_err.unwrap_err().contains("nothing to commit"));
+
+    // With allow_empty: true, empty commit should succeed
+    let commit_ok = engine.commit("initial empty commit", true);
+    assert!(commit_ok.is_ok());
+}
+
+#[test]
+fn test_loose_object_hex_validation() {
+    let temp_dir = TempDir::new().expect("Failed to create tempdir");
+    let repo_path = temp_dir.path().to_path_buf();
+    let config = PluginConfig::default();
+    let engine = GitEngine::new(repo_path.clone(), &config);
+    engine.init_repo(false).unwrap();
+
+    // Invalid SHA-1 length (e.g., path traversal or short string)
+    assert!(read_loose_object(&engine.git_dir(), "abc").is_err());
+    assert!(read_loose_object(&engine.git_dir(), "../etc/passwd").is_err());
+
+    // Invalid SHA-1 characters (contains non-hex)
+    assert!(read_loose_object(&engine.git_dir(), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
 }

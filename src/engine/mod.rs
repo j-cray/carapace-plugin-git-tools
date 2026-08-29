@@ -190,18 +190,54 @@ impl<'a> GitEngine<'a> {
         Ok(found)
     }
 
+    /// Recursively peel any tag object until reaching the underlying commit object hash
+    pub fn peel_to_commit(&self, obj_hex: &str) -> Result<String, String> {
+        let mut current = obj_hex.trim().to_string();
+        for _ in 0..10 {
+            let (kind, content) = read_loose_object(&self.git_dir(), &current)?;
+            match kind.as_str() {
+                "commit" => return Ok(current),
+                "tag" => {
+                    let text = String::from_utf8_lossy(&content);
+                    let mut target = None;
+                    for line in text.lines() {
+                        if let Some(stripped) = line.strip_prefix("object ") {
+                            target = Some(stripped.trim().to_string());
+                            break;
+                        }
+                    }
+                    if let Some(t) = target {
+                        current = t;
+                    } else {
+                        return Err(format!("Annotated tag '{current}' is missing target object"));
+                    }
+                }
+                _ => return Err(format!("Object '{current}' is a '{kind}', not a commit")),
+            }
+        }
+        Err(format!("Too many levels of tag indirection for '{obj_hex}'"))
+    }
+
     /// Check if ancestor_hash is an ancestor of descendant_hash in commit graph
     pub fn is_ancestor(&self, ancestor_hash: &str, descendant_hash: &str) -> bool {
-        if ancestor_hash == descendant_hash {
+        let anc = match self.peel_to_commit(ancestor_hash) {
+            Ok(h) => h,
+            Err(_) => ancestor_hash.to_string(),
+        };
+        let desc = match self.peel_to_commit(descendant_hash) {
+            Ok(h) => h,
+            Err(_) => descendant_hash.to_string(),
+        };
+        if anc == desc {
             return true;
         }
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
-        queue.push_back(descendant_hash.to_string());
-        visited.insert(descendant_hash.to_string());
+        queue.push_back(desc.clone());
+        visited.insert(desc);
 
         while let Some(cid) = queue.pop_front() {
-            if cid == ancestor_hash {
+            if cid == anc {
                 return true;
             }
             if let Ok((_, cdata)) = read_loose_object(&self.git_dir(), &cid) {
@@ -220,10 +256,13 @@ impl<'a> GitEngine<'a> {
 
     /// Find the lowest common ancestor (merge base) between two commit hashes
     pub fn find_merge_base(&self, one: &str, two: &str) -> Option<String> {
+        let one_commit = self.peel_to_commit(one).ok()?;
+        let two_commit = self.peel_to_commit(two).ok()?;
+
         let mut ancestors_one = HashSet::new();
         let mut q1 = VecDeque::new();
-        q1.push_back(one.to_string());
-        ancestors_one.insert(one.to_string());
+        q1.push_back(one_commit.clone());
+        ancestors_one.insert(one_commit);
 
         while let Some(cid) = q1.pop_front() {
             if let Ok((_, content)) = read_loose_object(&self.git_dir(), &cid) {
@@ -240,8 +279,8 @@ impl<'a> GitEngine<'a> {
 
         let mut q2 = VecDeque::new();
         let mut visited2 = HashSet::new();
-        q2.push_back(two.to_string());
-        visited2.insert(two.to_string());
+        q2.push_back(two_commit.clone());
+        visited2.insert(two_commit);
 
         while let Some(cid) = q2.pop_front() {
             if ancestors_one.contains(&cid) {
@@ -314,10 +353,11 @@ impl<'a> GitEngine<'a> {
         files
     }
 
-    /// Read files from a specific commit's tree
+    /// Read files from a specific commit's tree (automatically peeling tags)
     pub fn get_commit_tree_files(&self, commit_hex: &str) -> Result<BTreeMap<String, (u32, String)>, String> {
-        let (_, content) = read_loose_object(&self.git_dir(), commit_hex)?;
-        let parsed = parse_commit(commit_hex, &content)?;
+        let actual_commit_hex = self.peel_to_commit(commit_hex)?;
+        let (_, content) = read_loose_object(&self.git_dir(), &actual_commit_hex)?;
+        let parsed = parse_commit(&actual_commit_hex, &content)?;
         let mut files = BTreeMap::new();
         read_tree_all_files(&self.git_dir(), &parsed.tree_hash, "", &mut files)?;
         Ok(files)
@@ -329,7 +369,7 @@ impl<'a> GitEngine<'a> {
 
     /// Status of working directory and index
     pub fn status(&self) -> Result<GitToolResult, String> {
-        let _ = self.open_repo()?;
+        self.open_repo()?;
         let (branch_opt, head_commit_opt) = self.get_head()?;
 
         let branch_name = match branch_opt {
@@ -446,9 +486,10 @@ impl<'a> GitEngine<'a> {
 
             if !left.is_empty() {
                 if let Ok(left_hash) = self.rev_parse_hash(left) {
+                    let left_commit = self.peel_to_commit(&left_hash).unwrap_or(left_hash);
                     let mut ex_queue = VecDeque::new();
-                    ex_queue.push_back(left_hash.clone());
-                    excluded.insert(left_hash);
+                    ex_queue.push_back(left_commit.clone());
+                    excluded.insert(left_commit);
                     while let Some(cid) = ex_queue.pop_front() {
                         if let Ok((_, content)) = read_loose_object(&self.git_dir(), &cid) {
                             if let Ok(parsed) = parse_commit(&cid, &content) {
@@ -466,7 +507,7 @@ impl<'a> GitEngine<'a> {
 
             let right_rev = if right.is_empty() { "HEAD" } else { right };
             match self.rev_parse_hash(right_rev) {
-                Ok(h) => h,
+                Ok(h) => self.peel_to_commit(&h).unwrap_or(h),
                 Err(_) => {
                     return Ok(GitToolResult::ok(
                         json!({ "commits": [], "total": 0 }),
@@ -477,7 +518,7 @@ impl<'a> GitEngine<'a> {
         } else {
             let rev = if raw_range.is_empty() { "HEAD" } else { raw_range };
             match self.rev_parse_hash(rev) {
-                Ok(h) => h,
+                Ok(h) => self.peel_to_commit(&h).unwrap_or(h),
                 Err(_) => {
                     return Ok(GitToolResult::ok(
                         json!({ "commits": [], "total": 0 }),
@@ -683,6 +724,7 @@ impl<'a> GitEngine<'a> {
             let num_str = &rev[pos + 1..];
             let count: usize = if num_str.is_empty() { 1 } else { num_str.parse().unwrap_or(1) };
             let mut current = self.rev_parse_hash(base)?;
+            current = self.peel_to_commit(&current)?;
             for _ in 0..count {
                 let (_, content) = read_loose_object(&self.git_dir(), &current)?;
                 let parsed = parse_commit(&current, &content)?;
@@ -702,6 +744,7 @@ impl<'a> GitEngine<'a> {
             if suffix.chars().all(|c| c == '^') {
                 let caret_count = suffix.len();
                 let mut current = self.rev_parse_hash(base)?;
+                current = self.peel_to_commit(&current)?;
                 for _ in 0..caret_count {
                     let (_, content) = read_loose_object(&self.git_dir(), &current)?;
                     let parsed = parse_commit(&current, &content)?;
@@ -713,7 +756,8 @@ impl<'a> GitEngine<'a> {
                 }
                 return Ok(current);
             } else if let Ok(parent_idx) = suffix[1..].parse::<usize>() {
-                let current = self.rev_parse_hash(base)?;
+                let mut current = self.rev_parse_hash(base)?;
+                current = self.peel_to_commit(&current)?;
                 let (_, content) = read_loose_object(&self.git_dir(), &current)?;
                 let parsed = parse_commit(&current, &content)?;
                 if parent_idx == 0 || parent_idx > parsed.parents.len() {
@@ -829,6 +873,9 @@ impl<'a> GitEngine<'a> {
     /// Blame line-by-line annotation
     pub fn blame(&self, file_path: &str) -> Result<GitToolResult, String> {
         let norm_path = file_path.trim().trim_start_matches("./").replace('\\', "/");
+        if norm_path.is_empty() {
+            return Err("file_path cannot be empty".to_string());
+        }
         let abs_path = self.repo_path.join(&norm_path);
 
         if !vfs::is_file(&abs_path) {
@@ -906,18 +953,18 @@ impl<'a> GitEngine<'a> {
             }
         }
 
-        let summary = format!("Blame for {norm_path} ({} lines)", lines.len());
+        let summary = format!("Blame for '{}' ({} line(s))", norm_path, annotated_lines.len());
         Ok(GitToolResult::ok(
             json!({
-                "file": norm_path,
-                "lines_count": lines.len(),
-                "lines": annotated_lines
+                "file_path": norm_path,
+                "lines": annotated_lines,
+                "total_lines": annotated_lines.len()
             }),
             summary,
         ))
     }
 
-    /// Compute diff between commits, index, or working tree
+    /// Compute working directory or commit diff
     pub fn diff(
         &self,
         staged: bool,
@@ -1406,6 +1453,8 @@ impl<'a> GitEngine<'a> {
                         }
                     }
                 }
+            } else if index.is_empty() {
+                return Err("nothing to commit (create/copy files and use \"git add\" to track)".to_string());
             }
         }
 
@@ -1462,7 +1511,8 @@ impl<'a> GitEngine<'a> {
 
     /// Revert a commit
     pub fn revert(&self, commit_ref: &str, no_commit: bool) -> Result<GitToolResult, String> {
-        let commit_hash = self.rev_parse_hash(commit_ref)?;
+        let raw_hash = self.rev_parse_hash(commit_ref)?;
+        let commit_hash = self.peel_to_commit(&raw_hash)?;
         let (_, content) = read_loose_object(&self.git_dir(), &commit_hash)?;
         let parsed = parse_commit(&commit_hash, &content)?;
 
@@ -1577,7 +1627,7 @@ impl<'a> GitEngine<'a> {
                 }
                 let target = target_ref.unwrap_or("HEAD");
                 let target_hash = match self.rev_parse_hash(target) {
-                    Ok(h) => h,
+                    Ok(h) => self.peel_to_commit(&h).unwrap_or(h),
                     Err(_) if target == "HEAD" => "0000000000000000000000000000000000000000".to_string(),
                     Err(e) => return Err(e),
                 };
@@ -1650,29 +1700,27 @@ impl<'a> GitEngine<'a> {
         force: bool,
     ) -> Result<GitToolResult, String> {
         let heads_dir = self.git_dir().join("refs").join("heads");
-        let clean_branch_buf = branch_name.map(|s| s.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/").to_string());
-        let clean_branch = clean_branch_buf.as_deref();
-        let clean_new_buf = new_name.map(|s| s.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/").to_string());
-        let clean_new = clean_new_buf.as_deref();
+        let clean_branch = branch_name.map(|b| {
+            b.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/")
+        });
+        let clean_new = new_name.map(|b| {
+            b.trim().trim_start_matches("refs/heads/").trim_start_matches("heads/")
+        });
 
         match action {
             "list" => {
-                let mut branches = Vec::new();
-                let (current_opt, _) = self.get_head().unwrap_or((None, None));
-                let current_branch = current_opt.unwrap_or_default();
-
                 let mut branch_names = Vec::new();
                 if vfs::exists(&heads_dir) {
                     collect_refs_recursively(&heads_dir, &heads_dir, &mut branch_names);
                 }
 
-                // Also check packed-refs
+                // Check packed-refs
                 let packed_refs = self.git_dir().join("packed-refs");
                 if let Ok(content) = vfs::read_to_string(&packed_refs) {
                     for line in content.lines() {
                         let line = line.trim();
-                        if let Some(rname) = line.split_whitespace().nth(1) {
-                            if let Some(bname) = rname.strip_prefix("refs/heads/") {
+                        if let Some(b_ref) = line.split_whitespace().nth(1) {
+                            if let Some(bname) = b_ref.strip_prefix("refs/heads/") {
                                 if !branch_names.contains(&bname.to_string()) {
                                     branch_names.push(bname.to_string());
                                 }
@@ -1681,12 +1729,20 @@ impl<'a> GitEngine<'a> {
                     }
                 }
 
+                let (current_branch, _) = self.get_head().unwrap_or((None, None));
                 branch_names.sort();
-                for b in branch_names {
-                    let is_current = b == current_branch;
+
+                let mut branches = Vec::new();
+                for name in branch_names {
+                    let is_current = current_branch.as_deref() == Some(&name);
+                    let hash = self.rev_parse_hash(&name).unwrap_or_default();
+                    let short_hash = &hash[..7.min(hash.len())];
+
                     branches.push(json!({
-                        "name": b,
-                        "current": is_current
+                        "name": name,
+                        "current": is_current,
+                        "commit_hash": hash,
+                        "short_hash": short_hash
                     }));
                 }
 
@@ -1697,7 +1753,7 @@ impl<'a> GitEngine<'a> {
                 let name = clean_branch.ok_or_else(|| "branch_name is required to create a branch".to_string())?;
                 let target = start_point.unwrap_or("HEAD");
                 let hash = match self.rev_parse_hash(target) {
-                    Ok(h) => h,
+                    Ok(h) => self.peel_to_commit(&h).unwrap_or(h),
                     Err(_) if target == "HEAD" => "0000000000000000000000000000000000000000".to_string(),
                     Err(e) => return Err(e),
                 };
@@ -1749,20 +1805,20 @@ impl<'a> GitEngine<'a> {
             "rename" => {
                 let old = clean_branch.ok_or_else(|| "branch_name is required for rename".to_string())?;
                 let new = clean_new.ok_or_else(|| "new_name is required for rename".to_string())?;
-                
+
                 let old_hash = self.rev_parse_hash(old).map_err(|_| format!("Branch '{old}' not found."))?;
-                
+
                 let new_file = heads_dir.join(new);
                 if vfs::exists(&new_file) && !force {
                     return Err(format!("Branch '{new}' already exists."));
                 }
-                
+
                 if let Some(parent) = new_file.parent() {
                     vfs::create_dir_all(parent).map_err(|e| format!("Failed to create new branch directory: {e}"))?;
                 }
-                
+
                 vfs::write(&new_file, format!("{old_hash}\n")).map_err(|e| format!("Failed to write new branch: {e}"))?;
-                
+
                 let old_file = heads_dir.join(old);
                 if vfs::exists(&old_file) {
                     let _ = vfs::remove_file(&old_file);
@@ -1853,9 +1909,11 @@ impl<'a> GitEngine<'a> {
         no_ff: bool,
         squash: bool,
     ) -> Result<GitToolResult, String> {
-        let source_hash = self.rev_parse_hash(source_ref)?;
+        let raw_source_hash = self.rev_parse_hash(source_ref)?;
+        let source_hash = self.peel_to_commit(&raw_source_hash)?;
         let (_, head_commit_opt) = self.get_head()?;
-        let head_hash = head_commit_opt.ok_or_else(|| "Cannot merge into an empty repository".to_string())?;
+        let raw_head_hash = head_commit_opt.ok_or_else(|| "Cannot merge into an empty repository".to_string())?;
+        let head_hash = self.peel_to_commit(&raw_head_hash)?;
 
         if head_hash == source_hash || self.is_ancestor(&source_hash, &head_hash) {
             return Ok(GitToolResult::ok(

@@ -48,10 +48,15 @@ impl SafetyChecker {
     /// Check if target branch name is in the configured protected branches list
     pub fn is_branch_protected(branch_name: &str, config: &PluginConfig) -> bool {
         let normalized = Self::normalize_branch_name(branch_name);
-        config
-            .protected_branches
-            .iter()
-            .any(|b| b.trim().eq_ignore_ascii_case(&normalized))
+        config.protected_branches.iter().any(|b| {
+            let norm_b = Self::normalize_branch_name(b);
+            if norm_b.ends_with('*') {
+                let prefix = &norm_b[..norm_b.len() - 1];
+                normalized.starts_with(prefix)
+            } else {
+                norm_b.eq_ignore_ascii_case(&normalized)
+            }
+        })
     }
 
     /// Normalize branch name by removing prefixes like refs/heads/, refs/remotes/<remote>/, etc.
